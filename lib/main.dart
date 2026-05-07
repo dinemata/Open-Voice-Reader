@@ -1,121 +1,190 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 
 void main() {
+  // Nutné pro inicializaci pluginů (path_provider) před spuštěním aplikace
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Inicializace vazeb na nativní knihovnu
+  sherpa.initBindings();
   runApp(const MyApp());
 }
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.blue),
+      home: const SpeechTestScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class SpeechTestScreen extends StatefulWidget {
+  const SpeechTestScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<SpeechTestScreen> createState() => _SpeechTestScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _SpeechTestScreenState extends State<SpeechTestScreen> {
+  sherpa.OfflineTts? _tts;
+  bool _isReady = false;
+  String? _error;
+  String _currentLang = 'cs'; // 'cs' nebo 'en'
 
-  void _incrementCounter() {
+  final Map<String, String> _testTexts = {
+    'cs': 'Ahoj! Já jsem Jirka a tohle je test přirozené češtiny přímo v tvém mobilu. Doufám, že se ti moje aplikace líbí.',
+    'en': 'Hello! This is a test of the Kokoro voice model. It sounds very natural, just like Speechify, but it runs completely offline.',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _initEngine();
+  }
+
+  // Funkce pro přípravu souboru z assetů do dočasné paměti telefonu
+  Future<String> _getAssetPath(String assetName) async {
+    try {
+      final byteData = await rootBundle.load(assetName);
+      final directory = await getApplicationSupportDirectory();
+      final fileName = assetName.split('/').last;
+      final file = File('${directory.path}/$fileName');
+      
+      await file.create(recursive: true);
+      await file.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
+      return file.path;
+    } catch (e) {
+      throw Exception("Chyba při kopírování assetu $assetName: $e. Máte soubor v pubspec.yaml?");
+    }
+  }
+
+  Future<void> _initEngine() async {
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _isReady = false;
+      _error = null;
     });
+
+    try {
+      // 1. NEJDŮLEŽITĚJŠÍ: Načtení tokens.txt (Bez něj engine selže)
+      final tokensPath = await _getAssetPath('assets/models/tokens.txt');
+      
+      String modelPath;
+      String extraPath; // Pro Piper (CZ) je to .json, pro Kokoro (EN) je to voices.bin
+
+      if (_currentLang == 'cs') {
+        modelPath = await _getAssetPath('assets/models/cs_CZ-jirka-medium.onnx');
+        extraPath = await _getAssetPath('assets/models/cs_CZ-jirka-medium.onnx.json');
+      } else {
+        modelPath = await _getAssetPath('assets/models/kokoro-v1.0.onnx');
+        extraPath = await _getAssetPath('assets/models/voices-v1.0.bin');
+      }
+
+      // 2. Předání tokensPath do konfigurace modelů
+      final vits = _currentLang == 'cs'
+          ? sherpa.OfflineTtsVitsModelConfig(model: modelPath, lexicon: "", tokens: tokensPath)
+          : const sherpa.OfflineTtsVitsModelConfig();
+
+      final kokoro = _currentLang == 'en'
+          ? sherpa.OfflineTtsKokoroModelConfig(model: modelPath, voices: extraPath, tokens: tokensPath)
+          : const sherpa.OfflineTtsKokoroModelConfig();
+
+      // Konfigurace Sherpa-ONNX
+      final config = sherpa.OfflineTtsConfig(
+        model: sherpa.OfflineTtsModelConfig(
+          vits: vits,
+          kokoro: kokoro,
+          numThreads: 4,
+          debug: true,
+        ),
+      );
+
+      _tts?.free(); // Uvolníme starý, pokud existuje
+      _tts = sherpa.OfflineTts(config);
+      
+      if (mounted) {
+        setState(() => _isReady = true);
+      }
+    } catch (e) {
+      debugPrint("CHYBA inicializace TTS: $e");
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _isReady = false;
+        });
+      }
+    }
+  }
+
+  void _speak() {
+    if (_tts == null) return;
+    try {
+      final text = _testTexts[_currentLang]!;
+      final audio = _tts!.generate(text: text);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Hlas vygenerován pro: $_currentLang (Vzorků: ${audio.samples.length})')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Chyba při mluvení: $e')),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
+      appBar: AppBar(title: const Text('AI Voice Test 2026')),
       body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'cs', label: Text('Čeština (Jirka)')),
+                ButtonSegment(value: 'en', label: Text('English (Kokoro)')),
+              ],
+              selected: {_currentLang},
+              onSelectionChanged: (Set<String> newSelection) {
+                setState(() => _currentLang = newSelection.first);
+                _initEngine(); // Přenačtení modelu pro jiný jazyk
+              },
+            ),
+            const SizedBox(height: 20),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Text(
+                  'Chyba: $_error',
+                  style: const TextStyle(color: Colors.red),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            const SizedBox(height: 20),
+            Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Text(
+                _testTexts[_currentLang]!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 18, fontStyle: FontStyle.italic),
+              ),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              onPressed: _isReady ? _speak : null,
+              icon: _isReady ? const Icon(Icons.play_arrow) : const CircularProgressIndicator(strokeWidth: 2),
+              label: Text(_isReady ? 'Přečíst text' : 'Načítám AI model...'),
+              style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(20)),
             ),
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
       ),
     );
   }
