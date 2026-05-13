@@ -18,11 +18,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true, 
-        colorSchemeSeed: Colors.blue,
-      ),
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.blue),
       home: const SpeechTestScreen(),
     );
   }
@@ -38,9 +34,7 @@ class SpeechTestScreen extends StatefulWidget {
 class _SpeechTestScreenState extends State<SpeechTestScreen> {
   sherpa.OfflineTts? _tts;
   final AudioPlayer _audioPlayer = AudioPlayer();
-  
   bool _isReady = false;
-  bool _isBusy = false; 
   String? _error;
   String _currentLang = 'cs'; 
   String _appSupportDir = "";
@@ -54,10 +48,6 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   void initState() {
     super.initState();
     _initEngine();
-    
-    _audioPlayer.onPlayerComplete.listen((_) {
-      if (mounted) setState(() => _isBusy = false);
-    });
   }
 
   @override
@@ -67,10 +57,12 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
     super.dispose();
   }
 
+  // Robustní funkce pro kopírování souborů
   Future<String> _prepareFile(String assetPath, {String? targetPath}) async {
     try {
       final byteData = await rootBundle.load(assetPath);
       final directory = await getApplicationSupportDirectory();
+      
       final finalPath = targetPath ?? assetPath;
       final file = File('${directory.path}/$finalPath');
       
@@ -82,14 +74,12 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       await file.writeAsBytes(buffer, flush: true);
       return file.path;
     } catch (e) {
-      debugPrint("Asset $assetPath not found.");
+      debugPrint("Asset $assetPath chybí, přeskakuji...");
       return "";
     }
   }
 
   Future<void> _initEngine() async {
-    if (_isBusy) return;
-    
     setState(() {
       _isReady = false;
       _error = null;
@@ -99,59 +89,62 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       final dir = await getApplicationSupportDirectory();
       _appSupportDir = dir.path;
       
+      // CESTY K SLOŽKÁM
+      final kokoroBaseAsset = 'assets/models/kokoro-en-v0_19';
+      final jirkaBaseAsset = 'assets/models/vits-piper-cs_CZ-jirka-medium';
+      
+      // 1. PŘÍPRAVA SDÍLENÉ SLOŽKY ESPEAK-NG (Sjednocení dat)
+      const espeakDirName = 'shared-espeak-ng-data';
+      
+      // Kopírujeme CORE soubory (z Kokoro balíčku, protože je kompletnější)
+      await _prepareFile('$kokoroBaseAsset/espeak-ng-data/phontab', targetPath: '$espeakDirName/phontab');
+      await _prepareFile('$kokoroBaseAsset/espeak-ng-data/phondata', targetPath: '$espeakDirName/phondata');
+      await _prepareFile('$kokoroBaseAsset/espeak-ng-data/phondata-manifest', targetPath: '$espeakDirName/phondata-manifest');
+      await _prepareFile('$kokoroBaseAsset/espeak-ng-data/phonindex', targetPath: '$espeakDirName/phonindex');
+      await _prepareFile('$kokoroBaseAsset/espeak-ng-data/intonations', targetPath: '$espeakDirName/intonations');
+      
+      // Slovníky
+      await _prepareFile('$kokoroBaseAsset/espeak-ng-data/en_dict', targetPath: '$espeakDirName/en_dict');
+      await _prepareFile('$jirkaBaseAsset/espeak-ng-data/cs_dict', targetPath: '$espeakDirName/cs_dict');
+      
+      // Jazyková pravidla (přesně podle pubspec.yaml)
+      await _prepareFile('$kokoroBaseAsset/espeak-ng-data/lang/gmw/en', targetPath: '$espeakDirName/lang/gmw/en');
+      await _prepareFile('$kokoroBaseAsset/espeak-ng-data/lang/gmw/en-US', targetPath: '$espeakDirName/lang/gmw/en-US');
+
+      // 2. VYTVOŘENÍ HLASŮ
+      final voicesDir = Directory('$_appSupportDir/$espeakDirName/voices');
+      if (!await voicesDir.exists()) await voicesDir.create(recursive: true);
+      
+      // Mapujeme cs na cs, en-us na en-US pravidla
+      await File('${voicesDir.path}/cs').writeAsString("name cs\nlanguage cs\n");
+      await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en-US\n");
+
       sherpa.OfflineTtsModelConfig modelConfig;
 
       if (_currentLang == 'cs') {
-        final base = 'assets/models/vits-piper-cs_CZ-jirka-medium';
-        final modelPath = await _prepareFile('$base/cs_CZ-jirka-medium.onnx');
-        final tokensPath = await _prepareFile('$base/tokens.txt');
-        
-        await _prepareFile('$base/espeak-ng-data/phontab');
-        await _prepareFile('$base/espeak-ng-data/phondata');
-        await _prepareFile('$base/espeak-ng-data/phonindex');
-        await _prepareFile('$base/espeak-ng-data/intonations');
-        await _prepareFile('$base/espeak-ng-data/cs_dict');
-        
-        final voiceFile = File('$_appSupportDir/$base/espeak-ng-data/voices/cs');
-        if (!await voiceFile.exists()) {
-          await voiceFile.parent.create(recursive: true);
-          await voiceFile.writeAsString("name cs\nlanguage cs\n");
-        }
+        final modelPath = await _prepareFile('$jirkaBaseAsset/cs_CZ-jirka-medium.onnx');
+        final tokensPath = await _prepareFile('$jirkaBaseAsset/tokens.txt');
 
         modelConfig = sherpa.OfflineTtsModelConfig(
           vits: sherpa.OfflineTtsVitsModelConfig(
             model: modelPath, 
             tokens: tokensPath, 
-            dataDir: '$_appSupportDir/$base/espeak-ng-data'
+            dataDir: '$_appSupportDir/$espeakDirName'
           ),
           numThreads: 4,
           debug: true,
         );
       } else {
-        final base = 'assets/models/kokoro-en-v0_19';
-        final modelPath = await _prepareFile('$base/model.onnx');
-        final voicesPath = await _prepareFile('$base/voices.bin');
-        final tokensPath = await _prepareFile('$base/tokens.txt');
-        
-        final espeakDir = '$base/espeak-ng-data';
-        await _prepareFile('$espeakDir/phontab');
-        await _prepareFile('$espeakDir/phondata');
-        await _prepareFile('$espeakDir/phondata-manifest');
-        await _prepareFile('$espeakDir/phonindex');
-        await _prepareFile('$espeakDir/intonations');
-        await _prepareFile('$espeakDir/en_dict');
-        await _prepareFile('$espeakDir/lang/gmw/en');
-        await _prepareFile('$espeakDir/lang/gmw/en-US');
-
-        final voicesDir = Directory('$_appSupportDir/$espeakDir/voices');
-        if (!await voicesDir.exists()) await voicesDir.create(recursive: true);
-        await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en\n");
-        await File('${voicesDir.path}/en').writeAsString("name en\nlanguage en\n");
+        final modelPath = await _prepareFile('$kokoroBaseAsset/model.onnx');
+        final voicesPath = await _prepareFile('$kokoroBaseAsset/voices.bin');
+        final tokensPath = await _prepareFile('$kokoroBaseAsset/tokens.txt');
 
         modelConfig = sherpa.OfflineTtsModelConfig(
           kokoro: sherpa.OfflineTtsKokoroModelConfig(
-            model: modelPath, voices: voicesPath, tokens: tokensPath,
-            dataDir: '$_appSupportDir/$espeakDir',
+            model: modelPath, 
+            voices: voicesPath, 
+            tokens: tokensPath,
+            dataDir: '$_appSupportDir/$espeakDirName',
           ),
           numThreads: 4,
           debug: true,
@@ -163,22 +156,23 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       
       if (mounted) setState(() => _isReady = true);
     } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _isReady = false; });
+      debugPrint("CHYBA inicializace: $e");
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _isReady = false;
+        });
+      }
     }
   }
 
   void _speak() async {
-    if (_tts == null || _isBusy) return;
-
-    setState(() => _isBusy = true);
-
+    if (_tts == null) return;
     try {
       final text = _testTexts[_currentLang]!;
+      // SID 9 je George pro Kokoro, 0 pro Piper
       final sid = (_currentLang == 'en') ? 9 : 0;
       
-      // Let the UI render the loading state first
-      await Future.delayed(const Duration(milliseconds: 100));
-
       final audio = _tts!.generate(text: text, sid: sid);
       
       final tempDir = await getTemporaryDirectory();
@@ -192,12 +186,10 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
 
       if (success) {
         await _audioPlayer.play(DeviceFileSource(wavPath));
-      } else {
-        if (mounted) setState(() => _isBusy = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Přehrávám...')));
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _isBusy = false);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Chyba: $e')));
       }
     }
@@ -205,72 +197,42 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
 
   @override
   Widget build(BuildContext context) {
-    bool canPlay = _isReady && !_isBusy;
-
     return Scaffold(
       appBar: AppBar(title: const Text('AI Voice Test 2026')),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24),
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'cs', label: Text('CZ (Jirka)')),
-                  ButtonSegment(value: 'en', label: Text('EN (Kokoro)')),
-                ],
-                selected: {_currentLang},
-                onSelectionChanged: canPlay ? (Set<String> newSelection) {
-                  setState(() => _currentLang = newSelection.first);
-                  _initEngine();
-                } : null,
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'cs', label: Text('CZ (Jirka)')),
+                ButtonSegment(value: 'en', label: Text('EN (Kokoro)')),
+              ],
+              selected: {_currentLang},
+              onSelectionChanged: (Set<String> newSelection) {
+                setState(() => _currentLang = newSelection.first);
+                _initEngine();
+              },
+            ),
+            const SizedBox(height: 20),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text('Chyba: $_error', style: const TextStyle(color: Colors.red, fontSize: 10), textAlign: TextAlign.center),
               ),
-              const SizedBox(height: 30),
-              if (_error != null)
-                Text('Chyba: $_error', style: const TextStyle(color: Colors.red, fontSize: 11), textAlign: TextAlign.center),
-              
-              const SizedBox(height: 20),
-              Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade50,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.grey.shade200),
-                ),
-                child: Text(
-                  _testTexts[_currentLang]!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 18, height: 1.5),
-                ),
-              ),
-              const SizedBox(height: 50),
-              
-              // Big, constant size button
-              SizedBox(
-                width: double.infinity,
-                height: 80,
-                child: ElevatedButton.icon(
-                  onPressed: canPlay ? _speak : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: canPlay ? Theme.of(context).colorScheme.primaryContainer : Colors.grey.shade100,
-                    foregroundColor: canPlay ? Theme.of(context).colorScheme.onPrimaryContainer : Colors.grey.shade500,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                    elevation: 0,
-                  ),
-                  icon: _isBusy 
-                      ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.play_circle_filled, size: 32),
-                  label: Text(
-                    _isBusy 
-                        ? 'ZPRACOVÁVÁM...' 
-                        : (_isReady ? 'PŘEČÍST TEXT' : 'NAČÍTÁM MODEL...'),
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1.2),
-                  ),
-                ),
-              ),
-            ],
-          ),
+            const SizedBox(height: 40),
+            Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Text(_testTexts[_currentLang]!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 18)),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              onPressed: _isReady ? _speak : null,
+              icon: _isReady ? const Icon(Icons.volume_up) : const CircularProgressIndicator(strokeWidth: 2),
+              label: Text(_isReady ? 'Přečíst text' : 'Načítám AI model...'),
+              style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(20)),
+            ),
+          ],
         ),
       ),
     );
