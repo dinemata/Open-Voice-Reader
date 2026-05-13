@@ -1,7 +1,7 @@
 name: free_voice_reader
 description: "Free voice reader."
 publish_to: 'none'
-version: 0.0.3+1
+version: 0.0.4+1
 
 environment:
   sdk: ^3.10.3
