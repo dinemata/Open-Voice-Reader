@@ -1,7 +1,7 @@
 name: free_voice_reader
 description: "Free voice reader."
 publish_to: 'none'
-version: 0.0.2+1
+version: 0.0.3+1
 
 environment:
   sdk: ^3.10.3
@@ -25,19 +25,15 @@ flutter:
     - assets/models/vits-piper-cs_CZ-jirka-medium/cs_CZ-jirka-medium.onnx
     - assets/models/vits-piper-cs_CZ-jirka-medium/cs_CZ-jirka-medium.onnx.json
     - assets/models/vits-piper-cs_CZ-jirka-medium/tokens.txt
-    - assets/models/vits-piper-cs_CZ-jirka-medium/espeak-ng-data/phontab
-    - assets/models/vits-piper-cs_CZ-jirka-medium/espeak-ng-data/phondata
-    - assets/models/vits-piper-cs_CZ-jirka-medium/espeak-ng-data/phonindex
-    - assets/models/vits-piper-cs_CZ-jirka-medium/espeak-ng-data/intonations
     - assets/models/vits-piper-cs_CZ-jirka-medium/espeak-ng-data/cs_dict
     - assets/models/kokoro-en-v0_19/model.onnx
     - assets/models/kokoro-en-v0_19/voices.bin
     - assets/models/kokoro-en-v0_19/tokens.txt
     - assets/models/kokoro-en-v0_19/espeak-ng-data/phontab
     - assets/models/kokoro-en-v0_19/espeak-ng-data/phondata
+    - assets/models/kokoro-en-v0_19/espeak-ng-data/phondata-manifest
     - assets/models/kokoro-en-v0_19/espeak-ng-data/phonindex
     - assets/models/kokoro-en-v0_19/espeak-ng-data/intonations
     - assets/models/kokoro-en-v0_19/espeak-ng-data/en_dict
     - assets/models/kokoro-en-v0_19/espeak-ng-data/lang/gmw/en
-    - assets/models/kokoro-en-v0_19/espeak-ng-data/phondata-manifest
     - assets/models/kokoro-en-v0_19/espeak-ng-data/lang/gmw/en-US
