@@ -57,12 +57,14 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
     super.dispose();
   }
 
-  Future<String> _prepareFile(String assetPath, {String? targetPath}) async {
+  // Funkce pro přípravu souboru - vrací path nebo prázdný string
+  Future<String> _prepareFile(String assetPath, {String? targetFileName}) async {
     try {
       final byteData = await rootBundle.load(assetPath);
       final directory = await getApplicationSupportDirectory();
-      final finalPath = targetPath ?? assetPath;
-      final file = File('${directory.path}/$finalPath');
+      
+      final fileName = targetFileName ?? assetPath;
+      final file = File('${directory.path}/$fileName');
       
       if (!await file.parent.exists()) {
         await file.parent.create(recursive: true);
@@ -71,7 +73,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       await file.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
       return file.path;
     } catch (e) {
-      debugPrint("Asset $assetPath chybí, přeskakuji...");
+      debugPrint("Asset $assetPath nebyl nalezen, přeskakuji...");
       return "";
     }
   }
@@ -128,19 +130,15 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
         await _prepareFile('$base/espeak-ng-data/intonations');
         await _prepareFile('$base/espeak-ng-data/en_dict');
         
-        // JAZYKOVÁ DATA (Zajišťujeme i malá písmena pro Linux/Android)
+        // JAZYKOVÁ DATA (Normalizace na malá písmena pro Android)
         await _prepareFile('$base/espeak-ng-data/lang/gmw/en');
-        final usPath = await _prepareFile('$base/espeak-ng-data/lang/gmw/en-US');
-        if (usPath.isNotEmpty) {
-           // Vytvoříme kopii s malými písmeny (pojistka)
-           await File(usPath).copy('$_appSupportDir/$base/espeak-ng-data/lang/gmw/en-us');
-        }
+        await _prepareFile('$base/espeak-ng-data/lang/gmw/en-US', targetFileName: '$base/espeak-ng-data/lang/gmw/en-us');
 
         // Vytvoření hlasu en-us (mapujeme na jazyk en-us)
         final voicesDir = Directory('$_appSupportDir/$base/espeak-ng-data/voices');
         if (!await voicesDir.exists()) await voicesDir.create(recursive: true);
         await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en-us\n");
-        await File('${voicesDir.path}/en').writeAsString("name en\nlanguage en\n");
+        await File('${voicesDir.path}/en').writeAsString("name en\nlanguage en-us\n");
 
         modelConfig = sherpa.OfflineTtsModelConfig(
           kokoro: sherpa.OfflineTtsKokoroModelConfig(
@@ -174,7 +172,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
     try {
       final text = _testTexts[_currentLang]!;
       
-      // Pro Kokoro SID 3 (Sarah), pro Piper SID 0
+      // Pro Kokoro sid 3 (Sarah), pro Piper sid 0
       final sid = (_currentLang == 'en') ? 3 : 0;
       
       final audio = _tts!.generate(text: text, sid: sid);
