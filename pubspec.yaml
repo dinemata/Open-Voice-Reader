@@ -15,7 +15,8 @@ dependencies:
   audioplayers: ^5.2.1
   file_picker: ^11.0.2
   syncfusion_flutter_pdf: ^33.2.7
-  pdfx: ^2.9.2
+  syncfusion_flutter_pdfviewer: ^33.2.7
+
 
 dev_dependencies:
   flutter_test:

@@ -7,7 +7,7 @@ import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
-import 'package:pdfx/pdfx.dart';
+import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,7 +39,10 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   sherpa.OfflineTts? _tts;
   final AudioPlayer _audioPlayer = AudioPlayer();
   final ScrollController _scrollController = ScrollController();
-  PdfControllerPinch? _pdfController;
+  PdfViewerController? _pdfViewerController;
+  PdfTextSearchResult? _searchResult;
+
+  String? _pdfFilePath;
 
   bool _isReady = false;
   bool _isBusy = false;
@@ -71,6 +74,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   @override
   void initState() {
     super.initState();
+    _pdfViewerController = PdfViewerController();
     _initEngine();
 
     _audioPlayer.onPlayerComplete.listen((_) {
@@ -108,7 +112,8 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   @override
   void dispose() {
     _scrollController.dispose();
-    _pdfController?.dispose();
+    _pdfViewerController?.dispose();
+    _searchResult?.dispose();
     _audioPlayer.dispose();
     _tts?.free();
     super.dispose();
@@ -151,11 +156,6 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       await _prepareFile('$jirkaBaseAsset/espeak-ng-data/cs_dict', targetPath: '$espeakDirName/cs_dict');
       await _prepareFile('$esAssetDir/lang/gmw/en', targetPath: '$espeakDirName/lang/gmw/en');
       await _prepareFile('$esAssetDir/lang/gmw/en-US', targetPath: '$espeakDirName/lang/gmw/en-US');
-
-      final voicesDir = Directory('$_appSupportDir/$espeakDirName/voices');
-      if (!await voicesDir.exists()) await voicesDir.create(recursive: true);
-      await File('${voicesDir.path}/cs').writeAsString("name cs\nlanguage cs\n");
-      await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en-us\n");
 
       sherpa.OfflineTtsModelConfig modelConfig;
 
@@ -249,10 +249,8 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       _parsePdfByPages(document);
       document.dispose();
 
-      _pdfController?.dispose();
-      _pdfController = PdfControllerPinch(document: PdfDocument.openFile(filePath));
-
       setState(() {
+        _pdfFilePath = filePath;
         if (_textChunks.isEmpty) {
           _textChunks = ["PDF neobsahuje text."];
           _chunkPageMapping = [1];
@@ -283,9 +281,15 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       );
     }
 
-    if (_pdfController != null && _chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length) {
+    if (_pdfViewerController != null && _chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length) {
       int targetPage = _chunkPageMapping[index];
-      _pdfController!.jumpToPage(targetPage);
+      _pdfViewerController!.jumpToPage(targetPage);
+
+      _searchResult?.clear();
+      final textToHighlight = _textChunks[index];
+      if (textToHighlight.length > 5) {
+        _searchResult = _pdfViewerController!.searchText(textToHighlight);
+      }
     }
   }
 
@@ -444,7 +448,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                       style: TextStyle(fontSize: 13, color: Colors.grey.shade700, fontWeight: FontWeight.w500),
                     ),
                     Text(
-                      _showOriginalLayout ? 'Nativní PDF pohled' : 'Zjednodušené čtení',
+                      _showOriginalLayout ? 'PDF' : 'Čistý text',
                       style: TextStyle(fontSize: 13, color: Colors.blue.shade800, fontWeight: FontWeight.w600),
                     ),
                   ],
@@ -474,7 +478,6 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                       ),
                     )
                         : (_isPdfLoaded
-                    // FIX: IndexedStack zachovává stav PDF view v paměti a neničí ho
                         ? IndexedStack(
                       index: _showOriginalLayout ? 1 : 0,
                       children: [
@@ -520,12 +523,13 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                             );
                           },
                         ),
-                        if (_pdfController != null)
+                        if (_pdfFilePath != null)
                           ClipRRect(
                             borderRadius: BorderRadius.circular(16),
-                            child: PdfViewPinch(
-                              controller: _pdfController!,
-                              scrollDirection: Axis.vertical,
+                            child: SfPdfViewer.file(
+                              File(_pdfFilePath!),
+                              controller: _pdfViewerController,
+                              canShowScrollHead: false,
                             ),
                           )
                         else
