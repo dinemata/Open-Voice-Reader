@@ -1,13 +1,12 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_pdfview/flutter_pdfview.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
-import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:audio_service/audio_service.dart';
@@ -133,14 +132,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   sherpa.OfflineTts? _tts;
   final ItemScrollController _itemScrollController = ItemScrollController();
   final ItemPositionsListener _itemPositionsListener = ItemPositionsListener.create();
-  final PdfViewerController _pdfViewerController = PdfViewerController();
-  List<Rect> _currentHighlightBounds = [];
+  PDFViewController? _pdfViewController;
 
   String? _pdfFilePath;
   bool _isReady = false;
   bool _isBusy = false;
   bool _isParsingPdf = false;
-  String? _error;
   String _currentLang = 'cs';
   String _appSupportDir = "";
 
@@ -225,7 +222,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   @override
   void dispose() {
-    _pdfViewerController.dispose();
     _tts?.free();
     super.dispose();
   }
@@ -247,7 +243,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   Future<void> _initEngine() async {
     if (_isBusy) return;
-    setState(() { _isReady = false; _error = null; });
+    setState(() { _isReady = false; });
 
     try {
       final dir = await getApplicationSupportDirectory();
@@ -293,7 +289,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       _tts = sherpa.OfflineTts(sherpa.OfflineTtsConfig(model: modelConfig, maxNumSenetences: 1));
       if (mounted) setState(() => _isReady = true);
     } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _isReady = false; });
+      if (mounted) setState(() { _isReady = false; });
     }
   }
 
@@ -386,51 +382,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       });
     }
 
-    if (_chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length && _showOriginalLayout) {
+    if (_chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length && _showOriginalLayout && _pdfViewController != null) {
       int targetPage = _chunkPageMapping[index];
-      _pdfViewerController.jumpToPage(targetPage);
-
-      if (_pdfFilePath == null) return;
-
-      Future.delayed(const Duration(milliseconds: 200), () async {
-        if (!mounted || !_showOriginalLayout) return;
-
-        try {
-          final Uint8List bytes = await File(_pdfFilePath!).readAsBytes();
-          final sf.PdfDocument document = sf.PdfDocument(inputBytes: bytes);
-          final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
-
-          final List<sf.TextLine> textLines = extractor.extractTextLines(startPageIndex: targetPage - 1, endPageIndex: targetPage - 1);
-          final String targetChunkText = _textChunks[index].trim();
-
-          List<Rect> localBounds = [];
-
-          for (final sf.TextLine line in textLines) {
-            for (final sf.TextWord word in line.wordCollection) {
-              if (targetChunkText.contains(word.text) && word.text.trim().length > 1) {
-                localBounds.add(
-                  Rect.fromLTWH(
-                    word.bounds.left,
-                    word.bounds.top,
-                    word.bounds.width,
-                    word.bounds.height,
-                  ),
-                );
-              }
-            }
-          }
-
-          document.dispose();
-
-          if (mounted) {
-            setState(() {
-              _currentHighlightBounds = localBounds;
-            });
-          }
-        } catch (e) {
-          debugPrint('[PDF_HIGHLIGHT_ERROR] $e');
-        }
-      });
+      _pdfViewController!.setPage(targetPage - 1);
     }
   }
 
@@ -483,7 +437,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
       _scrollToCurrentChunk(_currentChunkIndex);
 
-      await Future.delayed(const Duration(milliseconds: 80));
+      await Future.delayed(const Duration(milliseconds: 50));
 
       final audio = _tts!.generate(text: text, sid: sid);
       final tempDir = await getTemporaryDirectory();
@@ -602,7 +556,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         ),
                       ),
                       Text(
-                        _showOriginalLayout ? 'Zobrazení: Původní PDF' : 'Zobrazení: Čistý text',
+                        _showOriginalLayout ? 'Zobrazení: Kniha' : 'Zobrazení: Čistý text',
                         style: TextStyle(fontSize: 12, color: Colors.blue.shade900, fontWeight: FontWeight.w600),
                       ),
                     ],
@@ -671,7 +625,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                           ? RichText(
                                         text: TextSpan(
                                           style: const TextStyle(fontSize: 17, height: 1.6, color: Colors.black87),
-                                          children: _buildHighlightedWords(_textChunks[index], context),
+                                          children: _buildHighlightedWords(_textChunks[index], context, false),
                                         ),
                                       )
                                           : Text(
@@ -688,10 +642,42 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                               ),
                             ),
                             if (_pdfFilePath != null)
-                              SfPdfViewer.file(
-                                File(_pdfFilePath!),
-                                controller: _pdfViewerController,
-                                canShowScrollHead: false,
+                              Stack(
+                                children: [
+                                  PDFView(
+                                    filePath: _pdfFilePath!,
+                                    enableSwipe: true,
+                                    swipeHorizontal: false,
+                                    autoSpacing: true,
+                                    pageFling: true,
+                                    backgroundColor: Colors.grey.shade100,
+                                    onViewCreated: (PDFViewController vc) {
+                                      _pdfViewController = vc;
+                                      _scrollToCurrentChunk(_currentChunkIndex);
+                                    },
+                                  ),
+                                  if (_isBusy && _currentChunkIndex < _textChunks.length)
+                                    Positioned(
+                                      left: 16,
+                                      right: 16,
+                                      bottom: 16,
+                                      child: Card(
+                                        elevation: 8,
+                                        color: Colors.white.withOpacity(0.95),
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                                        child: Padding(
+                                          padding: const EdgeInsets.all(16.0),
+                                          child: RichText(
+                                            textAlign: TextAlign.center,
+                                            text: TextSpan(
+                                              style: const TextStyle(fontSize: 16, height: 1.5, color: Colors.black87),
+                                              children: _buildHighlightedWords(_textChunks[_currentChunkIndex], context, true),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
                               )
                             else
                               const SizedBox.shrink(),
@@ -712,7 +698,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
                           child: IconButton(
                             icon: Icon(
-                              _showOriginalLayout ? Icons.text_snippet_outlined : Icons.picture_as_pdf_outlined,
+                              _showOriginalLayout ? Icons.text_snippet_outlined : Icons.menu_book_rounded,
                               color: Theme.of(context).colorScheme.primary,
                               size: 22,
                             ),
@@ -797,7 +783,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     );
   }
 
-  List<TextSpan> _buildHighlightedWords(String text, BuildContext context) {
+  List<TextSpan> _buildHighlightedWords(String text, BuildContext context, bool isBookMode) {
     List<String> words = text.split(' ');
     List<TextSpan> spans = [];
 
@@ -808,8 +794,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           text: words[i] + (i == words.length - 1 ? "" : " "),
           style: TextStyle(
             fontWeight: isCurrentWord ? FontWeight.bold : FontWeight.normal,
-            backgroundColor: isCurrentWord ? Theme.of(context).colorScheme.primary.withOpacity(0.3) : Colors.transparent,
-            color: isCurrentWord ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onPrimaryContainer,
+            backgroundColor: isCurrentWord
+                ? (isBookMode ? Colors.amber.withOpacity(0.4) : Theme.of(context).colorScheme.primary.withOpacity(0.2))
+                : Colors.transparent,
+            color: isCurrentWord
+                ? (isBookMode ? Colors.amber.shade900 : Theme.of(context).colorScheme.primary)
+                : (isBookMode ? Colors.black87 : Theme.of(context).colorScheme.onPrimaryContainer),
           ),
         ),
       );

@@ -14,11 +14,11 @@ dependencies:
   path_provider: ^2.1.5
   audioplayers: ^5.2.1
   file_picker: ^11.0.2
-  syncfusion_flutter_pdf: ^33.2.7
-  syncfusion_flutter_pdfviewer: ^33.2.7
   scrollable_positioned_list: ^0.3.8
   just_audio: ^0.10.5
   audio_service: ^0.18.18
+  flutter_pdfview: ^1.4.4
+  syncfusion_flutter_pdf: ^25.2.7
 
 
 dev_dependencies:
