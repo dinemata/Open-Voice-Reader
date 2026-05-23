@@ -1,18 +1,99 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
-import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:audio_service/audio_service.dart';
 
-void main() {
+late MyAudioHandler _audioHandler;
+late AudioPlayer _windowsPlayer;
+final bool _isMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   sherpa.initBindings();
+
+  if (_isMobile) {
+    _audioHandler = await AudioService.init(
+      builder: () => MyAudioHandler(),
+      config: const AudioServiceConfig(
+        androidNotificationChannelId: 'com.example.free_voice_reader.channel.audio',
+        androidNotificationChannelName: 'Čtečka knih',
+        androidNotificationOngoing: true,
+        androidShowNotificationBadge: true,
+      ),
+    );
+  } else {
+    _windowsPlayer = AudioPlayer();
+  }
+
   runApp(const MyApp());
+}
+
+class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
+  final AudioPlayer _player = AudioPlayer();
+
+  MyAudioHandler() {
+    _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
+  }
+
+  AudioPlayer get player => _player;
+
+  @override
+  Future<void> play() => _player.play();
+
+  @override
+  Future<void> pause() => _player.pause();
+
+  @override
+  Future<void> stop() => _player.stop();
+
+  Future<void> playFile(String path, String title) async {
+    mediaItem.add(MediaItem(
+      id: path,
+      album: "free_voice_reader",
+      title: title,
+      artist: "AI Hlas",
+    ));
+    await _player.setFilePath(path);
+    _player.play();
+  }
+
+  PlaybackState _transformEvent(PlaybackEvent event) {
+    return PlaybackState(
+      controls: [
+        MediaControl.skipToPrevious,
+        if (_player.playing) MediaControl.pause else MediaControl.play,
+        MediaControl.stop,
+        MediaControl.skipToNext,
+      ],
+      systemActions: const {
+        MediaAction.seek,
+        MediaAction.seekForward,
+        MediaAction.seekBackward,
+      },
+      androidCompactActionIndices: const [1],
+      processingState: const {
+        ProcessingState.idle: AudioProcessingState.idle,
+        ProcessingState.loading: AudioProcessingState.loading,
+        ProcessingState.buffering: AudioProcessingState.buffering,
+        ProcessingState.ready: AudioProcessingState.ready,
+        ProcessingState.completed: AudioProcessingState.completed,
+      }[_player.processingState]!,
+      playing: _player.playing,
+      updatePosition: _player.position,
+      bufferedPosition: _player.bufferedPosition,
+      speed: _player.speed,
+      queueIndex: event.currentIndex,
+    );
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -28,18 +109,27 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class SpeechTestScreen extends StatefulWidget {
+class SpeechTestScreen extends StatelessWidget {
   const SpeechTestScreen({super.key});
 
   @override
-  State<SpeechTestScreen> createState() => _SpeechTestScreenState();
+  Widget build(BuildContext context) {
+    return const SpeechTestView();
+  }
 }
 
-class _SpeechTestScreenState extends State<SpeechTestScreen> {
+class SpeechTestView extends StatefulWidget {
+  const SpeechTestView({super.key});
+
+  @override
+  State<SpeechTestView> createState() => _SpeechTestViewState();
+}
+
+class _SpeechTestViewState extends State<SpeechTestView> {
   sherpa.OfflineTts? _tts;
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  final ScrollController _scrollController = ScrollController();
-  PdfViewerController? _pdfViewerController;
+  final ItemScrollController _itemScrollController = ItemScrollController();
+  final ItemPositionsListener _itemPositionsListener = ItemPositionsListener.create();
+  final PdfViewerController _pdfViewerController = PdfViewerController();
   PdfTextSearchResult? _searchResult;
 
   String? _pdfFilePath;
@@ -58,13 +148,14 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   int? _selectedChunkIndex;
   bool _isPdfLoaded = false;
   bool _showOriginalLayout = false;
+  bool _isUserScrolling = false;
+  bool _isProgrammaticScrolling = false;
 
   bool _filterPageNumbers = true;
   bool _filterFootnotes = true;
   bool _filterLinks = true;
 
   String _cleanupMode = 'chytreParsovani';
-  String? _lastLoadedRawText;
 
   final Map<String, String> _testTexts = {
     'cs': 'Ahoj! Já jsem Jirka a tohle je test přirozené češtiny přímo v tvém mobilu.',
@@ -74,47 +165,71 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   @override
   void initState() {
     super.initState();
-    _pdfViewerController = PdfViewerController();
     _initEngine();
 
-    _audioPlayer.onPlayerComplete.listen((_) {
-      if (_isPdfLoaded && _audioPlayer.releaseMode != ReleaseMode.loop) {
-        _currentWordIndex = 0;
-        _currentChunkIndex++;
-        _readNextChunk();
-      } else {
-        if (mounted) setState(() => _isBusy = false);
+    _itemPositionsListener.itemPositions.addListener(() {
+      if (_textChunks.isEmpty || _isParsingPdf || _isProgrammaticScrolling) return;
+      final positions = _itemPositionsListener.itemPositions.value;
+      if (positions.isEmpty) return;
+      bool currentVisible = positions.any((position) => position.index == _currentChunkIndex);
+      if (!currentVisible && !_isUserScrolling) {
+        setState(() { _isUserScrolling = true; });
       }
     });
 
-    _audioPlayer.onPositionChanged.listen((position) {
-      if (_textChunks.isEmpty || _currentChunkIndex >= _textChunks.length) return;
-
-      final currentText = _textChunks[_currentChunkIndex];
-      List<String> words = currentText.split(' ');
-      if (words.isEmpty) return;
-
-      _audioPlayer.getDuration().then((totalDuration) {
-        if (totalDuration == null || totalDuration.inMilliseconds == 0) return;
-
-        double progress = position.inMilliseconds / totalDuration.inMilliseconds;
-        int calculatedWordIndex = (progress * words.length).floor();
-
-        if (calculatedWordIndex != _currentWordIndex && calculatedWordIndex < words.length) {
-          setState(() {
-            _currentWordIndex = calculatedWordIndex;
-          });
+    if (_isMobile) {
+      _audioHandler.playbackState.listen((state) {
+        if (state.processingState == AudioProcessingState.completed && _isPdfLoaded && _isBusy) {
+          _handleTrackComplete();
         }
       });
-    });
+
+      _audioHandler.player.positionStream.listen((position) {
+        _updateWordHighlight(position);
+      });
+    } else {
+      _windowsPlayer.processingStateStream.listen((state) {
+        if (state == ProcessingState.completed && _isPdfLoaded && _isBusy) {
+          _handleTrackComplete();
+        }
+      });
+
+      _windowsPlayer.positionStream.listen((position) {
+        _updateWordHighlight(position);
+      });
+    }
+  }
+
+  void _updateWordHighlight(Duration position) {
+    if (!_isBusy || _textChunks.isEmpty || _currentChunkIndex >= _textChunks.length) return;
+
+    final currentText = _textChunks[_currentChunkIndex];
+    List<String> words = currentText.split(' ');
+    if (words.isEmpty) return;
+
+    final totalDuration = _isMobile ? _audioHandler.player.duration : _windowsPlayer.duration;
+    if (totalDuration == null || totalDuration.inMilliseconds == 0) return;
+
+    double progress = position.inMilliseconds / totalDuration.inMilliseconds;
+    int calculatedWordIndex = (progress * words.length).floor();
+
+    if (calculatedWordIndex != _currentWordIndex && calculatedWordIndex < words.length) {
+      setState(() {
+        _currentWordIndex = calculatedWordIndex;
+      });
+    }
+  }
+
+  void _handleTrackComplete() {
+    _currentWordIndex = 0;
+    _currentChunkIndex++;
+    _readNextChunk();
   }
 
   @override
   void dispose() {
-    _scrollController.dispose();
-    _pdfViewerController?.dispose();
+    _pdfViewerController.dispose();
     _searchResult?.dispose();
-    _audioPlayer.dispose();
     _tts?.free();
     super.dispose();
   }
@@ -189,7 +304,6 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   void _parsePdfByPages(sf.PdfDocument document) {
     _textChunks.clear();
     _chunkPageMapping.clear();
-
     final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
 
     for (int pageIdx = 0; pageIdx < document.pages.count; pageIdx++) {
@@ -200,14 +314,9 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       for (var line in rawLines) {
         String word = line.trim();
         if (word.isEmpty) continue;
-
         if (_cleanupMode == 'chytreParsovani') {
           if (word.contains(RegExp(r'https?://\S+|www\.\S+'))) continue;
-          if (RegExp(r'^\d+$').hasMatch(word) ||
-              RegExp(r'^\[\d+\]$').hasMatch(word) ||
-              RegExp(r'^(page|strana)\s*\d+', caseSensitive: false).hasMatch(word)) {
-            continue;
-          }
+          if (RegExp(r'^\d+$').hasMatch(word) || RegExp(r'^\[\d+\]$').hasMatch(word) || RegExp(r'^(page|strana)\s*\d+', caseSensitive: false).hasMatch(word)) continue;
         }
         cleanedWords.add(word);
       }
@@ -219,7 +328,6 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
         } else {
           currentSentence.write(" $word");
         }
-
         bool isEndOfSentence = word.endsWith('.') || word.endsWith('?') || word.endsWith('!');
         if (isEndOfSentence || currentSentence.length > 200) {
           _textChunks.add(currentSentence.toString().trim());
@@ -240,11 +348,9 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       if (result == null || result.files.single.path == null) return;
 
       setState(() { _isParsingPdf = true; _isBusy = true; _isPdfLoaded = false; });
-
       final filePath = result.files.single.path!;
       final file = File(filePath);
       final Uint8List bytes = await file.readAsBytes();
-
       final sf.PdfDocument document = sf.PdfDocument(inputBytes: bytes);
       _parsePdfByPages(document);
       document.dispose();
@@ -264,33 +370,49 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       });
     } catch (e) {
       setState(() { _isParsingPdf = false; _isBusy = false; });
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Chyba PDF: $e')));
     }
   }
 
   void _scrollToCurrentChunk(int index) {
-    if (_scrollController.hasClients && _textChunks.isNotEmpty) {
-      final double itemHeight = 52.0;
-      final double viewportHeight = _scrollController.position.viewportDimension;
-      double targetPosition = (index * itemHeight) - (viewportHeight / 3);
-
-      _scrollController.animateTo(
-        targetPosition.clamp(0.0, _scrollController.position.maxScrollExtent),
+    if (_itemScrollController.isAttached && _textChunks.isNotEmpty && !_isUserScrolling) {
+      _isProgrammaticScrolling = true;
+      _itemScrollController.scrollTo(
+        index: index,
+        alignment: 0.25,
         duration: const Duration(milliseconds: 280),
         curve: Curves.fastOutSlowIn,
-      );
+      ).then((_) {
+        _isProgrammaticScrolling = false;
+      });
     }
 
-    if (_pdfViewerController != null && _chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length) {
+    if (_chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length) {
       int targetPage = _chunkPageMapping[index];
-      _pdfViewerController!.jumpToPage(targetPage);
+      _pdfViewerController.jumpToPage(targetPage);
 
-      _searchResult?.clear();
-      final textToHighlight = _textChunks[index];
-      if (textToHighlight.length > 5) {
-        _searchResult = _pdfViewerController!.searchText(textToHighlight);
+      final fullText = _textChunks[index];
+      List<String> searchWords = fullText.split(' ');
+      String safeSearchPhrase = searchWords.length > 2 ? searchWords.take(2).join(' ') : fullText;
+
+      if (safeSearchPhrase.length > 2) {
+        Future.delayed(const Duration(milliseconds: 300), () {
+          _searchResult?.clear();
+          _searchResult = _pdfViewerController.searchText(safeSearchPhrase);
+          _searchResult?.addListener(() {
+            if (_searchResult != null && _searchResult!.hasResult && mounted) {
+              setState(() {
+                _searchResult!.nextInstance();
+              });
+            }
+          });
+        });
       }
     }
+  }
+
+  void _recenterToCurrentChunk() {
+    setState(() { _isUserScrolling = false; });
+    _scrollToCurrentChunk(_currentChunkIndex);
   }
 
   void _startPdfReading() {
@@ -299,23 +421,28 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
     _readNextChunk();
   }
 
-  void _stopPdfReading() {
-    _audioPlayer.stop();
+  void _stopPdfReading() async {
+    if (_isMobile) {
+      await _audioHandler.stop();
+    } else {
+      await _windowsPlayer.stop();
+    }
     setState(() { _isBusy = false; });
   }
 
   void _jumpToSelectedAndPlay() async {
     if (_selectedChunkIndex == null || _selectedChunkIndex! >= _textChunks.length) return;
-
-    setState(() { _isBusy = true; });
-    await _audioPlayer.stop();
-
+    setState(() { _isBusy = true; _isUserScrolling = false; });
+    if (_isMobile) {
+      await _audioHandler.stop();
+    } else {
+      await _windowsPlayer.stop();
+    }
     setState(() {
       _currentChunkIndex = _selectedChunkIndex!;
       _currentWordIndex = 0;
       _selectedChunkIndex = null;
     });
-
     _readNextChunkDirect();
   }
 
@@ -324,22 +451,23 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       setState(() { _isBusy = false; });
       return;
     }
-
     try {
       final text = _textChunks[_currentChunkIndex];
       final sid = (_currentLang == 'en') ? 9 : 0;
-
       _scrollToCurrentChunk(_currentChunkIndex);
 
       final audio = _tts!.generate(text: text, sid: sid);
       final tempDir = await getTemporaryDirectory();
       final wavPath = '${tempDir.path}/chunk_$_currentChunkIndex.wav';
-
       final success = sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate);
 
       if (success) {
-        if (mounted) setState(() {});
-        await _audioPlayer.play(DeviceFileSource(wavPath));
+        if (_isMobile) {
+          await _audioHandler.playFile(wavPath, text);
+        } else {
+          await _windowsPlayer.setFilePath(wavPath);
+          _windowsPlayer.play();
+        }
       }
     } catch (e) {
       setState(() { _isBusy = false; });
@@ -351,22 +479,23 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       setState(() { _isBusy = false; });
       return;
     }
-
     try {
       final text = _textChunks[_currentChunkIndex];
       final sid = (_currentLang == 'en') ? 9 : 0;
-
       _scrollToCurrentChunk(_currentChunkIndex);
 
       final audio = _tts!.generate(text: text, sid: sid);
       final tempDir = await getTemporaryDirectory();
       final wavPath = '${tempDir.path}/chunk_$_currentChunkIndex.wav';
-
       final success = sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate);
 
       if (success) {
-        if (mounted) setState(() {});
-        await _audioPlayer.play(DeviceFileSource(wavPath));
+        if (_isMobile) {
+          await _audioHandler.playFile(wavPath, text);
+        } else {
+          await _windowsPlayer.setFilePath(wavPath);
+          _windowsPlayer.play();
+        }
       } else {
         _currentWordIndex = 0;
         _currentChunkIndex++;
@@ -388,7 +517,12 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       final tempDir = await getTemporaryDirectory();
       final wavPath = '${tempDir.path}/output.wav';
       if (sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate)) {
-        await _audioPlayer.play(DeviceFileSource(wavPath));
+        if (_isMobile) {
+          await _audioHandler.playFile(wavPath, text);
+        } else {
+          await _windowsPlayer.setFilePath(wavPath);
+          _windowsPlayer.play();
+        }
       } else {
         setState(() => _isBusy = false);
       }
@@ -448,7 +582,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                       style: TextStyle(fontSize: 13, color: Colors.grey.shade700, fontWeight: FontWeight.w500),
                     ),
                     Text(
-                      _showOriginalLayout ? 'PDF' : 'Čistý text',
+                      _showOriginalLayout ? 'PDF' : 'Text',
                       style: TextStyle(fontSize: 13, color: Colors.blue.shade800, fontWeight: FontWeight.w600),
                     ),
                   ],
@@ -481,8 +615,9 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                         ? IndexedStack(
                       index: _showOriginalLayout ? 1 : 0,
                       children: [
-                        ListView.builder(
-                          controller: _scrollController,
+                        ScrollablePositionedList.builder(
+                          itemScrollController: _itemScrollController,
+                          itemPositionsListener: _itemPositionsListener,
                           itemCount: _textChunks.length,
                           itemBuilder: (context, index) {
                             bool isCurrentSentence = _isBusy && index == _currentChunkIndex;
@@ -530,6 +665,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                               File(_pdfFilePath!),
                               controller: _pdfViewerController,
                               canShowScrollHead: false,
+                              currentSearchTextHighlightColor: Colors.yellow.withOpacity(0.6),
                             ),
                           )
                         else
@@ -555,6 +691,17 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                             setState(() { _showOriginalLayout = !_showOriginalLayout; });
                           },
                         ),
+                      ),
+                    ),
+                  if (_isPdfLoaded && _isUserScrolling && !_showOriginalLayout)
+                    Positioned(
+                      bottom: 12,
+                      right: 12,
+                      child: FloatingActionButton.small(
+                        onPressed: _recenterToCurrentChunk,
+                        backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+                        foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                        child: const Icon(Icons.vertical_align_center),
                       ),
                     ),
                 ],
