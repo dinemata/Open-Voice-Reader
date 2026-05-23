@@ -6,7 +6,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:syncfusion_flutter_pdf/pdf.dart';
+import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
+import 'package:pdfx/pdfx.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -38,6 +39,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   sherpa.OfflineTts? _tts;
   final AudioPlayer _audioPlayer = AudioPlayer();
   final ScrollController _scrollController = ScrollController();
+  PdfControllerPinch? _pdfController;
 
   bool _isReady = false;
   bool _isBusy = false;
@@ -47,11 +49,11 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   String _appSupportDir = "";
 
   List<String> _textChunks = [];
+  List<int> _chunkPageMapping = [];
   int _currentChunkIndex = 0;
   int _currentWordIndex = 0;
   int? _selectedChunkIndex;
   bool _isPdfLoaded = false;
-  bool _isPlayingPdf = false;
   bool _showOriginalLayout = false;
 
   bool _filterPageNumbers = true;
@@ -72,7 +74,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
     _initEngine();
 
     _audioPlayer.onPlayerComplete.listen((_) {
-      if (_isPlayingPdf) {
+      if (_isPdfLoaded && _audioPlayer.releaseMode != ReleaseMode.loop) {
         _currentWordIndex = 0;
         _currentChunkIndex++;
         _readNextChunk();
@@ -82,7 +84,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
     });
 
     _audioPlayer.onPositionChanged.listen((position) {
-      if (!_isPlayingPdf || _textChunks.isEmpty || _currentChunkIndex >= _textChunks.length) return;
+      if (_textChunks.isEmpty || _currentChunkIndex >= _textChunks.length) return;
 
       final currentText = _textChunks[_currentChunkIndex];
       List<String> words = currentText.split(' ');
@@ -106,6 +108,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   @override
   void dispose() {
     _scrollController.dispose();
+    _pdfController?.dispose();
     _audioPlayer.dispose();
     _tts?.free();
     super.dispose();
@@ -183,51 +186,52 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
     }
   }
 
-  List<String> _chunkText(String rawText) {
-    List<String> rawLines = rawText.split('\n');
-    List<String> cleanedWords = [];
+  void _parsePdfByPages(sf.PdfDocument document) {
+    _textChunks.clear();
+    _chunkPageMapping.clear();
 
-    for (int i = 0; i < rawLines.length; i++) {
-      String word = rawLines[i].trim();
-      if (word.isEmpty) continue;
+    final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
 
-      if (_cleanupMode == 'chytreParsovani') {
-        if (word.contains(RegExp(r'https?://\S+|www\.\S+'))) continue;
+    for (int pageIdx = 0; pageIdx < document.pages.count; pageIdx++) {
+      String pageText = extractor.extractText(startPageIndex: pageIdx, endPageIndex: pageIdx);
+      List<String> rawLines = pageText.split('\n');
+      List<String> cleanedWords = [];
 
-        if (RegExp(r'^\d+$').hasMatch(word) ||
-            RegExp(r'^\[\d+\]$').hasMatch(word) ||
-            RegExp(r'^(page|strana)\s*\d+', caseSensitive: false).hasMatch(word)) {
-          continue;
+      for (var line in rawLines) {
+        String word = line.trim();
+        if (word.isEmpty) continue;
+
+        if (_cleanupMode == 'chytreParsovani') {
+          if (word.contains(RegExp(r'https?://\S+|www\.\S+'))) continue;
+          if (RegExp(r'^\d+$').hasMatch(word) ||
+              RegExp(r'^\[\d+\]$').hasMatch(word) ||
+              RegExp(r'^(page|strana)\s*\d+', caseSensitive: false).hasMatch(word)) {
+            continue;
+          }
+        }
+        cleanedWords.add(word);
+      }
+
+      StringBuffer currentSentence = StringBuffer();
+      for (var word in cleanedWords) {
+        if (currentSentence.isEmpty) {
+          currentSentence.write(word);
+        } else {
+          currentSentence.write(" $word");
+        }
+
+        bool isEndOfSentence = word.endsWith('.') || word.endsWith('?') || word.endsWith('!');
+        if (isEndOfSentence || currentSentence.length > 200) {
+          _textChunks.add(currentSentence.toString().trim());
+          _chunkPageMapping.add(pageIdx + 1);
+          currentSentence.clear();
         }
       }
-      cleanedWords.add(word);
-    }
-
-    List<String> chunks = [];
-    StringBuffer currentSentence = StringBuffer();
-
-    for (int i = 0; i < cleanedWords.length; i++) {
-      String word = cleanedWords[i];
-
-      if (currentSentence.isEmpty) {
-        currentSentence.write(word);
-      } else {
-        currentSentence.write(" $word");
-      }
-
-      bool isEndOfSentence = word.endsWith('.') || word.endsWith('?') || word.endsWith('!');
-
-      if (isEndOfSentence || currentSentence.length > 200) {
-        chunks.add(currentSentence.toString().trim());
-        currentSentence.clear();
+      if (currentSentence.isNotEmpty) {
+        _textChunks.add(currentSentence.toString().trim());
+        _chunkPageMapping.add(pageIdx + 1);
       }
     }
-
-    if (currentSentence.isNotEmpty) {
-      chunks.add(currentSentence.toString().trim());
-    }
-
-    return chunks.where((element) => element.isNotEmpty).toList();
   }
 
   Future<void> _pickAndParsePdf() async {
@@ -235,21 +239,24 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['pdf']);
       if (result == null || result.files.single.path == null) return;
 
-      setState(() { _isParsingPdf = true; _isBusy = true; _isPlayingPdf = false; });
+      setState(() { _isParsingPdf = true; _isBusy = true; _isPdfLoaded = false; });
 
-      final file = File(result.files.single.path!);
+      final filePath = result.files.single.path!;
+      final file = File(filePath);
       final Uint8List bytes = await file.readAsBytes();
-      final PdfDocument document = PdfDocument(inputBytes: bytes);
-      final PdfTextExtractor extractor = PdfTextExtractor(document);
 
-      final String text = extractor.extractText();
+      final sf.PdfDocument document = sf.PdfDocument(inputBytes: bytes);
+      _parsePdfByPages(document);
       document.dispose();
 
-      _lastLoadedRawText = text;
-      final chunks = _chunkText(text);
+      _pdfController?.dispose();
+      _pdfController = PdfControllerPinch(document: PdfDocument.openFile(filePath));
 
       setState(() {
-        _textChunks = chunks.isNotEmpty ? chunks : ["PDF neobsahuje text."];
+        if (_textChunks.isEmpty) {
+          _textChunks = ["PDF neobsahuje text."];
+          _chunkPageMapping = [1];
+        }
         _currentChunkIndex = 0;
         _currentWordIndex = 0;
         _selectedChunkIndex = null;
@@ -263,23 +270,10 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
     }
   }
 
-  void _reprocessCurrentText() {
-    if (_lastLoadedRawText == null) return;
-    setState(() {
-      _isPlayingPdf = false;
-      _audioPlayer.stop();
-      _textChunks = _chunkText(_lastLoadedRawText!);
-      _currentChunkIndex = 0;
-      _currentWordIndex = 0;
-      _selectedChunkIndex = null;
-    });
-  }
-
   void _scrollToCurrentChunk(int index) {
-    if (_scrollController.hasClients && _textChunks.isNotEmpty && !_showOriginalLayout) {
+    if (_scrollController.hasClients && _textChunks.isNotEmpty) {
       final double itemHeight = 52.0;
       final double viewportHeight = _scrollController.position.viewportDimension;
-
       double targetPosition = (index * itemHeight) - (viewportHeight / 3);
 
       _scrollController.animateTo(
@@ -288,40 +282,42 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
         curve: Curves.fastOutSlowIn,
       );
     }
+
+    if (_pdfController != null && _chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length) {
+      int targetPage = _chunkPageMapping[index];
+      _pdfController!.jumpToPage(targetPage);
+    }
   }
 
   void _startPdfReading() {
     if (_textChunks.isEmpty || _tts == null) return;
-    setState(() { _isPlayingPdf = true; _isBusy = true; });
+    setState(() { _isBusy = true; });
     _readNextChunk();
   }
 
   void _stopPdfReading() {
-    _isPlayingPdf = false;
     _audioPlayer.stop();
     setState(() { _isBusy = false; });
   }
 
-  void _jumpToSelectedAndPlay() {
+  void _jumpToSelectedAndPlay() async {
     if (_selectedChunkIndex == null || _selectedChunkIndex! >= _textChunks.length) return;
 
-    _isPlayingPdf = false;
-    _audioPlayer.stop();
+    setState(() { _isBusy = true; });
+    await _audioPlayer.stop();
 
     setState(() {
       _currentChunkIndex = _selectedChunkIndex!;
       _currentWordIndex = 0;
       _selectedChunkIndex = null;
-      _isPlayingPdf = true;
-      _isBusy = true;
     });
 
     _readNextChunkDirect();
   }
 
   void _readNextChunkDirect() async {
-    if (!_isPlayingPdf || _currentChunkIndex >= _textChunks.length) {
-      setState(() { _isPlayingPdf = false; _isBusy = false; });
+    if (_currentChunkIndex >= _textChunks.length) {
+      setState(() { _isBusy = false; });
       return;
     }
 
@@ -342,13 +338,13 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
         await _audioPlayer.play(DeviceFileSource(wavPath));
       }
     } catch (e) {
-      setState(() { _isPlayingPdf = false; _isBusy = false; });
+      setState(() { _isBusy = false; });
     }
   }
 
   void _readNextChunk() async {
-    if (!_isPlayingPdf || _currentChunkIndex >= _textChunks.length) {
-      setState(() { _isPlayingPdf = false; _isBusy = false; });
+    if (_currentChunkIndex >= _textChunks.length || !_isBusy) {
+      setState(() { _isBusy = false; });
       return;
     }
 
@@ -381,7 +377,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
 
   void _speakTest() async {
     if (_tts == null || _isBusy) return;
-    setState(() { _isBusy = true; _isPlayingPdf = false; });
+    setState(() { _isBusy = true; });
     try {
       final text = _testTexts[_currentLang]!;
       final audio = _tts!.generate(text: text, sid: (_currentLang == 'en') ? 9 : 0);
@@ -426,61 +422,6 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                     } : null,
                   ),
                 ),
-                const SizedBox(width: 8),
-
-                PopupMenuButton<void>(
-                  icon: const Icon(Icons.tune, size: 24),
-                  itemBuilder: (BuildContext context) => [
-                    PopupMenuItem<void>(
-                      enabled: false,
-                      child: StatefulBuilder(
-                        builder: (context, menuState) => CheckboxListTile(
-                          title: const Text('Čísla stránek', style: TextStyle(fontSize: 14)),
-                          value: _filterPageNumbers,
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          onChanged: !_isPlayingPdf ? (bool? value) {
-                            menuState(() => _filterPageNumbers = value ?? false);
-                            setState(() => _filterPageNumbers = value ?? false);
-                            _reprocessCurrentText();
-                          } : null,
-                        ),
-                      ),
-                    ),
-                    PopupMenuItem<void>(
-                      enabled: false,
-                      child: StatefulBuilder(
-                        builder: (context, menuState) => CheckboxListTile(
-                          title: const Text('Poznámky pod čarou', style: TextStyle(fontSize: 14)),
-                          value: _filterFootnotes,
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          onChanged: !_isPlayingPdf ? (bool? value) {
-                            menuState(() => _filterFootnotes = value ?? false);
-                            setState(() => _filterFootnotes = value ?? false);
-                            _reprocessCurrentText();
-                          } : null,
-                        ),
-                      ),
-                    ),
-                    PopupMenuItem<void>(
-                      enabled: false,
-                      child: StatefulBuilder(
-                        builder: (context, menuState) => CheckboxListTile(
-                          title: const Text('Odkazy / URL', style: TextStyle(fontSize: 14)),
-                          value: _filterLinks,
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          onChanged: !_isPlayingPdf ? (bool? value) {
-                            menuState(() => _filterLinks = value ?? false);
-                            setState(() => _filterLinks = value ?? false);
-                            _reprocessCurrentText();
-                          } : null,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -503,7 +444,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                       style: TextStyle(fontSize: 13, color: Colors.grey.shade700, fontWeight: FontWeight.w500),
                     ),
                     Text(
-                      _showOriginalLayout ? 'Původní rozvržení' : 'Zjednodušené čtení',
+                      _showOriginalLayout ? 'Nativní PDF pohled' : 'Zjednodušené čtení',
                       style: TextStyle(fontSize: 13, color: Colors.blue.shade800, fontWeight: FontWeight.w600),
                     ),
                   ],
@@ -515,7 +456,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                 children: [
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.all(12),
+                    padding: _showOriginalLayout ? EdgeInsets.zero : const EdgeInsets.all(12),
                     decoration: BoxDecoration(
                       color: Colors.grey.shade50,
                       borderRadius: BorderRadius.circular(16),
@@ -533,65 +474,64 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                       ),
                     )
                         : (_isPdfLoaded
-                        ? (_showOriginalLayout
-                        ? SingleChildScrollView(
-                      child: Padding(
-                        padding: const EdgeInsets.all(8.0),
-                        child: Text(
-                          _lastLoadedRawText ?? "",
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontFamily: 'Courier',
-                            height: 1.4,
-                            color: Colors.black87,
-                          ),
-                        ),
-                      ),
-                    )
-                        : ListView.builder(
-                      controller: _scrollController,
-                      itemCount: _textChunks.length,
-                      itemBuilder: (context, index) {
-                        bool isCurrentSentence = _isPlayingPdf && index == _currentChunkIndex;
-                        bool isSelectedSentence = index == _selectedChunkIndex;
+                    // FIX: IndexedStack zachovává stav PDF view v paměti a neničí ho
+                        ? IndexedStack(
+                      index: _showOriginalLayout ? 1 : 0,
+                      children: [
+                        ListView.builder(
+                          controller: _scrollController,
+                          itemCount: _textChunks.length,
+                          itemBuilder: (context, index) {
+                            bool isCurrentSentence = _isBusy && index == _currentChunkIndex;
+                            bool isSelectedSentence = index == _selectedChunkIndex;
 
-                        return InkWell(
-                          onTap: () {
-                            setState(() {
-                              _selectedChunkIndex = index;
-                            });
-                          },
-                          borderRadius: BorderRadius.circular(8),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            margin: const EdgeInsets.symmetric(vertical: 2),
-                            padding: const EdgeInsets.all(6),
-                            decoration: BoxDecoration(
-                              color: isCurrentSentence
-                                  ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.4)
-                                  : (isSelectedSentence ? Colors.orange.shade50 : Colors.transparent),
+                            return InkWell(
+                              onTap: () {
+                                setState(() { _selectedChunkIndex = index; });
+                              },
                               borderRadius: BorderRadius.circular(8),
-                              border: isSelectedSentence ? Border.all(color: Colors.orange.shade300, width: 1) : null,
-                            ),
-                            child: isCurrentSentence
-                                ? RichText(
-                              text: TextSpan(
-                                style: TextStyle(fontSize: 16, height: 1.5, color: Theme.of(context).colorScheme.onPrimaryContainer),
-                                children: _buildHighlightedWords(_textChunks[index], context),
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 200),
+                                margin: const EdgeInsets.symmetric(vertical: 2),
+                                padding: const EdgeInsets.all(6),
+                                decoration: BoxDecoration(
+                                  color: isCurrentSentence
+                                      ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.4)
+                                      : (isSelectedSentence ? Colors.orange.shade50 : Colors.transparent),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: isSelectedSentence ? Border.all(color: Colors.orange.shade300, width: 1) : null,
+                                ),
+                                child: isCurrentSentence
+                                    ? RichText(
+                                  text: TextSpan(
+                                    style: TextStyle(fontSize: 16, height: 1.5, color: Theme.of(context).colorScheme.onPrimaryContainer),
+                                    children: _buildHighlightedWords(_textChunks[index], context),
+                                  ),
+                                )
+                                    : Text(
+                                  _textChunks[index],
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    height: 1.5,
+                                    color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
+                                  ),
+                                ),
                               ),
-                            )
-                                : Text(
-                              _textChunks[index],
-                              style: TextStyle(
-                                fontSize: 15,
-                                height: 1.5,
-                                color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
-                              ),
+                            );
+                          },
+                        ),
+                        if (_pdfController != null)
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: PdfViewPinch(
+                              controller: _pdfController!,
+                              scrollDirection: Axis.vertical,
                             ),
-                          ),
-                        );
-                      },
-                    ))
+                          )
+                        else
+                          const SizedBox.shrink(),
+                      ],
+                    )
                         : Center(child: Text(_testTexts[_currentLang]!, style: const TextStyle(fontSize: 16), textAlign: TextAlign.center))),
                   ),
                   if (_isPdfLoaded && !_isParsingPdf)
@@ -603,14 +543,12 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                         radius: 20,
                         child: IconButton(
                           icon: Icon(
-                            _showOriginalLayout ? Icons.visibility : Icons.visibility_off,
+                            _showOriginalLayout ? Icons.text_fields : Icons.picture_as_pdf,
                             color: Colors.blue.shade700,
                             size: 20,
                           ),
                           onPressed: () {
-                            setState(() {
-                              _showOriginalLayout = !_showOriginalLayout;
-                            });
+                            setState(() { _showOriginalLayout = !_showOriginalLayout; });
                           },
                         ),
                       ),
@@ -650,17 +588,17 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                         ),
                         icon: const Icon(Icons.forward, size: 26),
-                        label: const Text('PŘEJÍT NA VYBRANÉ MÍSTO', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        label: const Text('SPUSTIT OD VYBRANÉHO MÍSTA', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                       )
                           : ElevatedButton.icon(
-                        onPressed: _isReady ? (_isPlayingPdf ? _stopPdfReading : _startPdfReading) : null,
+                        onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: _isPlayingPdf ? Colors.red.shade50 : Theme.of(context).colorScheme.primaryContainer,
-                          foregroundColor: _isPlayingPdf ? Colors.red : Theme.of(context).colorScheme.onPrimaryContainer,
+                          backgroundColor: _isBusy ? Colors.red.shade50 : Theme.of(context).colorScheme.primaryContainer,
+                          foregroundColor: _isBusy ? Colors.red : Theme.of(context).colorScheme.onPrimaryContainer,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                         ),
-                        icon: Icon(_isPlayingPdf ? Icons.stop : Icons.play_arrow, size: 26),
-                        label: Text(_isPlayingPdf ? 'ZASTAVIT' : 'PŘEČÍST KNIHU', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        icon: Icon(_isBusy ? Icons.stop : Icons.play_arrow, size: 26),
+                        label: Text(_isBusy ? 'ZASTAVIT' : 'PŘEČÍST KNIHU', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                       ),
                     ),
                   ),
