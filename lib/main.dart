@@ -52,6 +52,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   int? _selectedChunkIndex;
   bool _isPdfLoaded = false;
   bool _isPlayingPdf = false;
+  bool _showOriginalLayout = false;
 
   bool _filterPageNumbers = true;
   bool _filterFootnotes = true;
@@ -275,7 +276,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
   }
 
   void _scrollToCurrentChunk(int index) {
-    if (_scrollController.hasClients && _textChunks.isNotEmpty) {
+    if (_scrollController.hasClients && _textChunks.isNotEmpty && !_showOriginalLayout) {
       final double itemHeight = 52.0;
       final double viewportHeight = _scrollController.position.viewportDimension;
 
@@ -303,6 +304,7 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
 
   void _jumpToSelectedAndPlay() {
     if (_selectedChunkIndex == null || _selectedChunkIndex! >= _textChunks.length) return;
+
     _isPlayingPdf = false;
     _audioPlayer.stop();
 
@@ -313,7 +315,35 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
       _isPlayingPdf = true;
       _isBusy = true;
     });
-    _readNextChunk();
+
+    _readNextChunkDirect();
+  }
+
+  void _readNextChunkDirect() async {
+    if (!_isPlayingPdf || _currentChunkIndex >= _textChunks.length) {
+      setState(() { _isPlayingPdf = false; _isBusy = false; });
+      return;
+    }
+
+    try {
+      final text = _textChunks[_currentChunkIndex];
+      final sid = (_currentLang == 'en') ? 9 : 0;
+
+      _scrollToCurrentChunk(_currentChunkIndex);
+
+      final audio = _tts!.generate(text: text, sid: sid);
+      final tempDir = await getTemporaryDirectory();
+      final wavPath = '${tempDir.path}/chunk_$_currentChunkIndex.wav';
+
+      final success = sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate);
+
+      if (success) {
+        if (mounted) setState(() {});
+        await _audioPlayer.play(DeviceFileSource(wavPath));
+      }
+    } catch (e) {
+      setState(() { _isPlayingPdf = false; _isBusy = false; });
+    }
   }
 
   void _readNextChunk() async {
@@ -473,79 +503,119 @@ class _SpeechTestScreenState extends State<SpeechTestScreen> {
                       style: TextStyle(fontSize: 13, color: Colors.grey.shade700, fontWeight: FontWeight.w500),
                     ),
                     Text(
-                      'Načteno textu: 100 %',
-                      style: TextStyle(fontSize: 13, color: Colors.green.shade700, fontWeight: FontWeight.w500),
+                      _showOriginalLayout ? 'Původní rozvržení' : 'Zjednodušené čtení',
+                      style: TextStyle(fontSize: 13, color: Colors.blue.shade800, fontWeight: FontWeight.w600),
                     ),
                   ],
                 ),
               ),
 
             Expanded(
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade50,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.grey.shade200),
-                ),
-                child: _isParsingPdf
-                    ? const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 16),
-                      Text('Chroustám a čistím formátování PDF...', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w500)),
-                    ],
-                  ),
-                )
-                    : (_isPdfLoaded
-                    ? ListView.builder(
-                  controller: _scrollController,
-                  itemCount: _textChunks.length,
-                  itemBuilder: (context, index) {
-                    bool isCurrentSentence = _isPlayingPdf && index == _currentChunkIndex;
-                    bool isSelectedSentence = index == _selectedChunkIndex;
-
-                    return InkWell(
-                      onTap: () {
-                        setState(() {
-                          _selectedChunkIndex = index;
-                        });
-                      },
-                      borderRadius: BorderRadius.circular(8),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        margin: const EdgeInsets.symmetric(vertical: 2),
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          color: isCurrentSentence
-                              ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.4)
-                              : (isSelectedSentence ? Colors.orange.shade50 : Colors.transparent),
-                          borderRadius: BorderRadius.circular(8),
-                          border: isSelectedSentence ? Border.all(color: Colors.orange.shade300, width: 1) : null,
-                        ),
-                        child: isCurrentSentence
-                            ? RichText(
-                          text: TextSpan(
-                            style: TextStyle(fontSize: 16, height: 1.5, color: Theme.of(context).colorScheme.onPrimaryContainer),
-                            children: _buildHighlightedWords(_textChunks[index], context),
-                          ),
-                        )
-                            : Text(
-                          _textChunks[index],
-                          style: TextStyle(
-                            fontSize: 15,
-                            height: 1.5,
-                            color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
+              child: Stack(
+                children: [
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: _isParsingPdf
+                        ? const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          CircularProgressIndicator(),
+                          SizedBox(height: 16),
+                          Text('Chroustám a čistím formátování PDF...', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w500)),
+                        ],
+                      ),
+                    )
+                        : (_isPdfLoaded
+                        ? (_showOriginalLayout
+                        ? SingleChildScrollView(
+                      child: Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Text(
+                          _lastLoadedRawText ?? "",
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontFamily: 'Courier',
+                            height: 1.4,
+                            color: Colors.black87,
                           ),
                         ),
                       ),
-                    );
-                  },
-                )
-                    : Center(child: Text(_testTexts[_currentLang]!, style: const TextStyle(fontSize: 16), textAlign: TextAlign.center))),
+                    )
+                        : ListView.builder(
+                      controller: _scrollController,
+                      itemCount: _textChunks.length,
+                      itemBuilder: (context, index) {
+                        bool isCurrentSentence = _isPlayingPdf && index == _currentChunkIndex;
+                        bool isSelectedSentence = index == _selectedChunkIndex;
+
+                        return InkWell(
+                          onTap: () {
+                            setState(() {
+                              _selectedChunkIndex = index;
+                            });
+                          },
+                          borderRadius: BorderRadius.circular(8),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            margin: const EdgeInsets.symmetric(vertical: 2),
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: isCurrentSentence
+                                  ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.4)
+                                  : (isSelectedSentence ? Colors.orange.shade50 : Colors.transparent),
+                              borderRadius: BorderRadius.circular(8),
+                              border: isSelectedSentence ? Border.all(color: Colors.orange.shade300, width: 1) : null,
+                            ),
+                            child: isCurrentSentence
+                                ? RichText(
+                              text: TextSpan(
+                                style: TextStyle(fontSize: 16, height: 1.5, color: Theme.of(context).colorScheme.onPrimaryContainer),
+                                children: _buildHighlightedWords(_textChunks[index], context),
+                              ),
+                            )
+                                : Text(
+                              _textChunks[index],
+                              style: TextStyle(
+                                fontSize: 15,
+                                height: 1.5,
+                                color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ))
+                        : Center(child: Text(_testTexts[_currentLang]!, style: const TextStyle(fontSize: 16), textAlign: TextAlign.center))),
+                  ),
+                  if (_isPdfLoaded && !_isParsingPdf)
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: CircleAvatar(
+                        backgroundColor: Colors.white.withOpacity(0.9),
+                        radius: 20,
+                        child: IconButton(
+                          icon: Icon(
+                            _showOriginalLayout ? Icons.visibility : Icons.visibility_off,
+                            color: Colors.blue.shade700,
+                            size: 20,
+                          ),
+                          onPressed: () {
+                            setState(() {
+                              _showOriginalLayout = !_showOriginalLayout;
+                            });
+                          },
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
 
