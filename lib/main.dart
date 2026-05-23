@@ -137,7 +137,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final PdfViewerController _pdfViewerController = PdfViewerController();
 
   sf.PdfDocument? _loadedDocument;
-  HighlightAnnotation? _currentHighlight;
+  HighlightAnnotation? _sentenceHighlight;
+  HighlightAnnotation? _wordHighlight;
   String? _pdfFilePath;
 
   bool _isReady = false;
@@ -148,6 +149,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   List<String> _textChunks = [];
   List<int> _chunkPageMapping = [];
+  List<List<sf.TextWord>> _pageWordsCache = [];
+
   int _currentChunkIndex = 0;
   int _currentWordIndex = 0;
   int? _selectedChunkIndex;
@@ -155,6 +158,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   bool _showOriginalLayout = false;
   bool _isUserScrolling = false;
   bool _isProgrammaticScrolling = false;
+  int _lastCachedPage = -1;
 
   final String _cleanupMode = 'chytreParsovani';
 
@@ -213,9 +217,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     int calculatedWordIndex = (progress * words.length).floor();
 
     if (calculatedWordIndex != _currentWordIndex && calculatedWordIndex < words.length) {
-      setState(() {
-        _currentWordIndex = calculatedWordIndex;
-      });
+      _currentWordIndex = calculatedWordIndex;
+      if (_showOriginalLayout) {
+        _updatePdfVisualHighlights();
+      } else {
+        setState(() {});
+      }
     }
   }
 
@@ -304,6 +311,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _textChunks.clear();
     _chunkPageMapping.clear();
     final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
+    _pageWordsCache = List.generate(document.pages.count, (_) => []);
 
     for (int pageIdx = 0; pageIdx < document.pages.count; pageIdx++) {
       String pageText = extractor.extractText(startPageIndex: pageIdx, endPageIndex: pageIdx);
@@ -359,6 +367,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       _parsePdfByPages(document);
       document.dispose();
 
+      _loadedDocument?.dispose();
+      _loadedDocument = sf.PdfDocument(inputBytes: bytes);
+      _lastCachedPage = -1;
+
       setState(() {
         _pdfFilePath = filePath;
         if (_textChunks.isEmpty) {
@@ -390,41 +402,99 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       });
     }
 
-    if (_chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length && _showOriginalLayout && _loadedDocument != null) {
+    if (_chunkPageMapping.isNotEmpty && index < _chunkPageMapping.length && _showOriginalLayout) {
       int targetPage = _chunkPageMapping[index];
       _pdfViewerController.jumpToPage(targetPage);
+    }
+  }
 
-      if (_currentHighlight != null) {
-        _pdfViewerController.removeAnnotation(_currentHighlight!);
-        _currentHighlight = null;
-      }
+  void _updatePdfVisualHighlights() {
+    if (_loadedDocument == null || !_showOriginalLayout || !_isBusy || _currentChunkIndex >= _textChunks.length) return;
 
+    final int targetPage = _chunkPageMapping[_currentChunkIndex];
+
+    if (_lastCachedPage != targetPage) {
+      debugPrint('[PDF_DEBUG] Caching structural positions for page $targetPage');
       final sf.PdfTextExtractor textExtractor = sf.PdfTextExtractor(_loadedDocument!);
-      final List<sf.TextLine> textLines = textExtractor.extractTextLines(startPageIndex: targetPage - 1);
-      final String targetChunkText = _textChunks[index].trim();
-      final List<sf.TextLine> toHighlight = [];
-
-      for (final sf.TextLine textLine in textLines) {
-        if (textLine.text.contains(targetChunkText) || targetChunkText.contains(textLine.text)) {
-          toHighlight.add(textLine);
+      final List<sf.TextLine> textLines = textExtractor.extractTextLines(startPageIndex: targetPage - 1, endPageIndex: targetPage - 1);
+      _pageWordsCache[targetPage - 1].clear();
+      for (final sf.TextLine line in textLines) {
+        for (final sf.TextWord word in line.wordCollection) {
+          _pageWordsCache[targetPage - 1].add(word);
         }
       }
+      _lastCachedPage = targetPage;
+    }
 
-      if (toHighlight.isNotEmpty) {
-        _currentHighlight = HighlightAnnotation(
-          textBoundsCollection: toHighlight
-              .map((line) => PdfTextLine(line.bounds, line.text, targetPage))
-              .toList(),
-        );
-        _currentHighlight!.color = Colors.yellow.withOpacity(0.4);
-        _pdfViewerController.addAnnotation(_currentHighlight!);
+    final List<sf.TextWord> pageWords = _pageWordsCache[targetPage - 1];
+    final String currentChunkText = _textChunks[_currentChunkIndex];
+    final List<String> chunkWords = currentChunkText.split(' ');
+
+    if (_currentWordIndex >= chunkWords.length) return;
+
+    final String cleanTargetWord = chunkWords[_currentWordIndex].replaceAll(RegExp(r'[^\wÁ-žá-ž]'), '').toLowerCase();
+
+    List<PdfTextLine> sentenceBounds = [];
+    List<PdfTextLine> wordBounds = [];
+
+    int wordSearchStartIndex = 0;
+    for (int i = 0; i < chunkWords.length; i++) {
+      final String chunkWord = chunkWords[i];
+      final String cleanChunkWord = chunkWord.replaceAll(RegExp(r'[^\wÁ-žá-ž]'), '').toLowerCase();
+      if (cleanChunkWord.isEmpty) continue;
+
+      for (int j = wordSearchStartIndex; j < pageWords.length; j++) {
+        final sf.TextWord pdfWord = pageWords[j];
+        final String cleanPdfWord = pdfWord.text.replaceAll(RegExp(r'[^\wÁ-žá-ž]'), '').toLowerCase();
+
+        if (cleanPdfWord == cleanChunkWord) {
+          sentenceBounds.add(PdfTextLine(pdfWord.bounds, pdfWord.text, targetPage));
+
+          if (i == _currentWordIndex && cleanPdfWord == cleanTargetWord) {
+            wordBounds.add(PdfTextLine(pdfWord.bounds, pdfWord.text, targetPage));
+          }
+
+          wordSearchStartIndex = j + 1;
+          break;
+        }
       }
+    }
+
+    debugPrint('[PDF_DEBUG] Selected bounds sizes - Sentence: ${sentenceBounds.length}, Word: ${wordBounds.length}');
+
+    if (mounted) {
+      if (_sentenceHighlight != null) _pdfViewerController.removeAnnotation(_sentenceHighlight!);
+      if (_wordHighlight != null) _pdfViewerController.removeAnnotation(_wordHighlight!);
+
+      if (sentenceBounds.isNotEmpty && sentenceBounds.length < 300) {
+        _sentenceHighlight = HighlightAnnotation(textBoundsCollection: sentenceBounds);
+        _sentenceHighlight!.color = Theme.of(context).colorScheme.primary.withOpacity(0.12);
+        _pdfViewerController.addAnnotation(_sentenceHighlight!);
+      }
+
+      if (wordBounds.isNotEmpty && wordBounds.length < 50) {
+        _wordHighlight = HighlightAnnotation(textBoundsCollection: wordBounds);
+        _wordHighlight!.color = Theme.of(context).colorScheme.primary.withOpacity(0.35);
+        _pdfViewerController.addAnnotation(_wordHighlight!);
+      }
+    }
+  }
+
+  void _clearPdfHighlights() {
+    if (_sentenceHighlight != null) {
+      _pdfViewerController.removeAnnotation(_sentenceHighlight!);
+      _sentenceHighlight = null;
+    }
+    if (_wordHighlight != null) {
+      _pdfViewerController.removeAnnotation(_wordHighlight!);
+      _wordHighlight = null;
     }
   }
 
   void _recenterToCurrentChunk() {
     setState(() { _isUserScrolling = false; });
     _scrollToCurrentChunk(_currentChunkIndex);
+    if (_showOriginalLayout) _updatePdfVisualHighlights();
   }
 
   void _startPdfReading() {
@@ -439,6 +509,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     } else {
       await _windowsPlayer.stop();
     }
+    _clearPdfHighlights();
     setState(() { _isBusy = false; });
   }
 
@@ -470,6 +541,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       final sid = (_currentLang == 'en') ? 9 : 0;
 
       _scrollToCurrentChunk(_currentChunkIndex);
+      if (_showOriginalLayout) _updatePdfVisualHighlights();
 
       await Future.delayed(const Duration(milliseconds: 30));
 
@@ -681,10 +753,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                 controller: _pdfViewerController,
                                 canShowScrollHead: false,
                                 canShowTextSelectionMenu: false,
-                                onDocumentLoaded: (PdfDocumentLoadedDetails details) {
-                                  _loadedDocument = details.document;
-                                  _scrollToCurrentChunk(_currentChunkIndex);
-                                },
                               )
                             else
                               const SizedBox.shrink(),
@@ -714,6 +782,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                 _showOriginalLayout = !_showOriginalLayout;
                               });
                               _scrollToCurrentChunk(_currentChunkIndex);
+                              if (_showOriginalLayout) {
+                                _updatePdfVisualHighlights();
+                              } else {
+                                _clearPdfHighlights();
+                              }
                             },
                           ),
                         ),
