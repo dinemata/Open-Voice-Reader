@@ -17,13 +17,7 @@ final bool _isMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  try {
-    sherpa.initBindings();
-    debugPrint('[SYS_DEBUG] Sherpa bindings initialized successfully.');
-  } catch (e) {
-    debugPrint('[SYS_CRITICAL] Failed to initialize Sherpa bindings: $e');
-  }
+  sherpa.initBindings();
 
   if (_isMobile) {
     _audioHandler = await AudioService.init(
@@ -87,8 +81,11 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   @override
   Future<void> stop() async {
-    debugPrint('[AUDIO_DEBUG] AudioHandler stop requested.');
-    await _player.stop();
+    try {
+      await _player.stop();
+    } catch (e) {
+      debugPrint('[HANDLER_FAULT] Stop exception caught safely: $e');
+    }
   }
 
   Future<void> playFile(String path, String title) async {
@@ -100,9 +97,10 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
         artist: "AI Hlas",
       ));
       await _player.setFilePath(path);
+      await Future.delayed(const Duration(milliseconds: 60));
       _player.play();
     } catch (e) {
-      debugPrint('[AUDIO_ERROR] playFile failed: $e');
+      debugPrint('[AUDIO_HANDLER_ERROR] playFile pipeline failed: $e');
     }
   }
 
@@ -220,6 +218,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   bool _isReady = false;
   bool _isBusy = false;
   bool _isParsingPdf = false;
+  bool _isGeneratingAudio = false;
   String _currentLang = 'cs';
 
   List<PdfChunkMetadata> _chunksMetadata = [];
@@ -298,12 +297,16 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
   }
 
-  void _handleTrackComplete() {
-    debugPrint('[TRACK_DEBUG] Chunk completed. Index track transition: $_currentChunkIndex');
+  void _handleTrackComplete() async {
+    debugPrint('[PIPELINE_INFO] Track ended for chunk $_currentChunkIndex. Cooldown initiated.');
     _currentWordIndex = 0;
     _lastProcessedWordIndex = -1;
     _currentChunkIndex++;
-    _executeChunkReading();
+
+    await Future.delayed(const Duration(milliseconds: 350));
+    if (_isBusy) {
+      _executeChunkReading();
+    }
   }
 
   @override
@@ -491,9 +494,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _isParsingPdf = false;
         _isBusy = false;
       });
-      debugPrint('[PARSER_DEBUG] Structuring finished. Memory allocations secured.');
+      debugPrint('[ENGINE_OK] Data structured and cached into application memory layers.');
     } catch (e) {
-      debugPrint('[PARSER_CRITICAL] Initialization pipeline failed: $e');
+      debugPrint('[ENGINE_FAIL] Structural file compilation crash details: $e');
       setState(() { _isParsingPdf = false; _isBusy = false; });
     }
   }
@@ -578,8 +581,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _stopPdfReading() async {
-    debugPrint('[AUDIO_DEBUG] Triggering explicit stop pipeline.');
-    setState(() { _isBusy = false; });
+    debugPrint('[MANUAL_STOP] Intercepting execution pipeline manually via interface.');
+    setState(() { _isBusy = false; _isGeneratingAudio = false; });
 
     try {
       if (_isMobile) {
@@ -588,7 +591,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         await _windowsPlayer.stop();
       }
     } catch (e) {
-      debugPrint('[AUDIO_WARN] Minor issue on interface tear-down: $e');
+      debugPrint('[MANUAL_STOP_EX] Safe suppression of tear-down exception: $e');
     }
 
     _clearPdfHighlights();
@@ -596,7 +599,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   void _jumpToSelectedAndPlay() async {
     if (_selectedChunkIndex == null || _selectedChunkIndex! >= _chunksMetadata.length) return;
-    setState(() { _isBusy = true; _isUserScrolling = false; });
+    setState(() { _isBusy = true; _isUserScrolling = false; _isGeneratingAudio = false; });
 
     try {
       if (_isMobile) {
@@ -616,41 +619,47 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _executeChunkReading() async {
-    if (_currentChunkIndex >= _chunksMetadata.length || !_isBusy) {
-      setState(() { _isBusy = false; });
+    if (_currentChunkIndex >= _chunksMetadata.length || !_isBusy || _isGeneratingAudio) {
+      if (_currentChunkIndex >= _chunksMetadata.length) setState(() => _isBusy = false);
       return;
     }
+
+    _isGeneratingAudio = true;
+
     try {
-      final text = _chunksMetadata[_currentChunkIndex].text;
+      final rawText = _chunksMetadata[_currentChunkIndex].text;
+      final text = ", . $rawText";
       final sid = (_currentLang == 'en') ? 9 : 0;
 
       _scrollToCurrentChunk(_currentChunkIndex);
       if (_showOriginalLayout) _updatePdfVisualHighlights();
-
-      await Future.delayed(const Duration(milliseconds: 30));
-      if (!_isBusy) return;
 
       final audio = _tts!.generate(text: text, sid: sid);
       final tempDir = await getTemporaryDirectory();
       final wavPath = '${tempDir.path}/chunk_$_currentChunkIndex.wav';
 
       final file = File(wavPath);
-      if (await file.exists()) await file.delete();
+      if (await file.exists()) {
+        await file.delete();
+      }
 
       final success = sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate);
+      _isGeneratingAudio = false;
 
       if (success && _isBusy) {
         if (_isMobile) {
-          await _audioHandler.playFile(wavPath, text);
+          await _audioHandler.playFile(wavPath, rawText);
         } else {
           await _windowsPlayer.setFilePath(wavPath);
+          await Future.delayed(const Duration(milliseconds: 50));
           _windowsPlayer.play();
         }
       } else {
         _skipToNextFailedChunk();
       }
     } catch (e) {
-      debugPrint('[LOOP_WARN] Pipeline auto-recovered from collision: $e');
+      _isGeneratingAudio = false;
+      debugPrint('[HARDWARE_RECOVERY] Automatic hardware crash prevention: $e');
       _skipToNextFailedChunk();
     }
   }
