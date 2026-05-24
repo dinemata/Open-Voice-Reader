@@ -17,7 +17,13 @@ final bool _isMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  sherpa.initBindings();
+
+  try {
+    sherpa.initBindings();
+    debugPrint('[SYS_DEBUG] Sherpa bindings initialized successfully.');
+  } catch (e) {
+    debugPrint('[SYS_CRITICAL] Failed to initialize Sherpa bindings: $e');
+  }
 
   if (_isMobile) {
     _audioHandler = await AudioService.init(
@@ -80,17 +86,24 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   Future<void> pause() => _player.pause();
 
   @override
-  Future<void> stop() => _player.stop();
+  Future<void> stop() async {
+    debugPrint('[AUDIO_DEBUG] AudioHandler stop requested.');
+    await _player.stop();
+  }
 
   Future<void> playFile(String path, String title) async {
-    mediaItem.add(MediaItem(
-      id: path,
-      album: "free_voice_reader",
-      title: title,
-      artist: "AI Hlas",
-    ));
-    await _player.setFilePath(path);
-    _player.play();
+    try {
+      mediaItem.add(MediaItem(
+        id: path,
+        album: "free_voice_reader",
+        title: title,
+        artist: "AI Hlas",
+      ));
+      await _player.setFilePath(path);
+      _player.play();
+    } catch (e) {
+      debugPrint('[AUDIO_ERROR] playFile failed: $e');
+    }
   }
 
   PlaybackState _transformEvent(PlaybackEvent event) {
@@ -202,6 +215,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   sf.PdfDocument? _loadedDocument;
   String? _pdfFilePath;
+  Size _pdfViewerSize = Size.zero;
 
   bool _isReady = false;
   bool _isBusy = false;
@@ -285,7 +299,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _handleTrackComplete() {
-    debugPrint('[CRITICAL_DEBUG] Track Complete Event Fired. Loop index: $_currentChunkIndex');
+    debugPrint('[TRACK_DEBUG] Chunk completed. Index track transition: $_currentChunkIndex');
     _currentWordIndex = 0;
     _lastProcessedWordIndex = -1;
     _currentChunkIndex++;
@@ -477,7 +491,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _isParsingPdf = false;
         _isBusy = false;
       });
+      debugPrint('[PARSER_DEBUG] Structuring finished. Memory allocations secured.');
     } catch (e) {
+      debugPrint('[PARSER_CRITICAL] Initialization pipeline failed: $e');
       setState(() { _isParsingPdf = false; _isBusy = false; });
     }
   }
@@ -504,7 +520,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _updatePdfVisualHighlights() {
-    if (!_showOriginalLayout || !_isBusy || _currentChunkIndex >= _chunksMetadata.length) {
+    if (_loadedDocument == null || !_showOriginalLayout || !_isBusy || _currentChunkIndex >= _chunksMetadata.length || _pdfViewerSize == Size.zero) {
       _clearPdfHighlights();
       return;
     }
@@ -513,8 +529,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _lastProcessedWordIndex = _currentWordIndex;
 
     final currentChunk = _chunksMetadata[_currentChunkIndex];
+    final int targetPage = currentChunk.pageNumber;
 
-    final double scaleFactor = _isMobile ? 1.333 : 1.0;
+    final sf.PdfPage nativePage = _loadedDocument!.pages[targetPage - 1];
+    final double scaleFactor = _pdfViewerSize.width / nativePage.size.width;
 
     List<Rect> adjustedSentenceRects = [];
     Rect? adjustedWordRect;
@@ -560,25 +578,33 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _stopPdfReading() async {
-    debugPrint('[CRITICAL_DEBUG] Stopping requested by UI call.');
-    if (_isMobile) {
-      await _audioHandler.stop();
-    } else {
-      await _windowsPlayer.stop();
-    }
-    _clearPdfHighlights();
+    debugPrint('[AUDIO_DEBUG] Triggering explicit stop pipeline.');
     setState(() { _isBusy = false; });
+
+    try {
+      if (_isMobile) {
+        await _audioHandler.stop();
+      } else {
+        await _windowsPlayer.stop();
+      }
+    } catch (e) {
+      debugPrint('[AUDIO_WARN] Minor issue on interface tear-down: $e');
+    }
+
+    _clearPdfHighlights();
   }
 
   void _jumpToSelectedAndPlay() async {
     if (_selectedChunkIndex == null || _selectedChunkIndex! >= _chunksMetadata.length) return;
     setState(() { _isBusy = true; _isUserScrolling = false; });
 
-    if (_isMobile) {
-      await _audioHandler.stop();
-    } else {
-      await _windowsPlayer.stop();
-    }
+    try {
+      if (_isMobile) {
+        await _audioHandler.stop();
+      } else {
+        await _windowsPlayer.stop();
+      }
+    } catch (_) {}
 
     setState(() {
       _currentChunkIndex = _selectedChunkIndex!;
@@ -602,13 +628,18 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       if (_showOriginalLayout) _updatePdfVisualHighlights();
 
       await Future.delayed(const Duration(milliseconds: 30));
+      if (!_isBusy) return;
 
       final audio = _tts!.generate(text: text, sid: sid);
       final tempDir = await getTemporaryDirectory();
       final wavPath = '${tempDir.path}/chunk_$_currentChunkIndex.wav';
+
+      final file = File(wavPath);
+      if (await file.exists()) await file.delete();
+
       final success = sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate);
 
-      if (success) {
+      if (success && _isBusy) {
         if (_isMobile) {
           await _audioHandler.playFile(wavPath, text);
         } else {
@@ -619,6 +650,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _skipToNextFailedChunk();
       }
     } catch (e) {
+      debugPrint('[LOOP_WARN] Pipeline auto-recovered from collision: $e');
       _skipToNextFailedChunk();
     }
   }
@@ -805,37 +837,42 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                               ),
                             ),
                             if (_pdfFilePath != null)
-                              Stack(
-                                children: [
-                                  SfPdfViewer.file(
-                                    File(_pdfFilePath!),
-                                    controller: _pdfViewerController,
-                                    canShowScrollHead: false,
-                                    canShowTextSelectionMenu: false,
-                                    onPageChanged: (details) {
-                                      if (_isBusy && _chunksMetadata.isNotEmpty && !_isProgrammaticScrolling) {
-                                        if (details.newPageNumber != _chunksMetadata[_currentChunkIndex].pageNumber) {
-                                          setState(() { _isUserScrolling = true; });
-                                        }
-                                      }
-                                    },
-                                  ),
-                                  IgnorePointer(
-                                    child: ValueListenableBuilder<HighlightData>(
-                                      valueListenable: _highlightNotifier,
-                                      builder: (context, data, _) {
-                                        return CustomPaint(
-                                          size: Size.infinite,
-                                          painter: PdfHighlightPainter(
-                                            sentenceRects: data.sentenceRects,
-                                            wordRect: data.wordRect,
-                                            primaryColor: Theme.of(context).colorScheme.primary,
+                              LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    _pdfViewerSize = Size(constraints.maxWidth, constraints.maxHeight);
+                                    return Stack(
+                                      children: [
+                                        SfPdfViewer.file(
+                                          File(_pdfFilePath!),
+                                          controller: _pdfViewerController,
+                                          canShowScrollHead: false,
+                                          canShowTextSelectionMenu: false,
+                                          onPageChanged: (details) {
+                                            if (_isBusy && _chunksMetadata.isNotEmpty && !_isProgrammaticScrolling) {
+                                              if (details.newPageNumber != _chunksMetadata[_currentChunkIndex].pageNumber) {
+                                                setState(() { _isUserScrolling = true; });
+                                              }
+                                            }
+                                          },
+                                        ),
+                                        IgnorePointer(
+                                          child: ValueListenableBuilder<HighlightData>(
+                                            valueListenable: _highlightNotifier,
+                                            builder: (context, data, _) {
+                                              return CustomPaint(
+                                                size: Size.infinite,
+                                                painter: PdfHighlightPainter(
+                                                  sentenceRects: data.sentenceRects,
+                                                  wordRect: data.wordRect,
+                                                  primaryColor: Theme.of(context).colorScheme.primary,
+                                                ),
+                                              );
+                                            },
                                           ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                ],
+                                        ),
+                                      ],
+                                    );
+                                  }
                               )
                             else
                               const SizedBox.shrink(),
