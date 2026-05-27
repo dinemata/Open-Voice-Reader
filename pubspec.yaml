@@ -1,7 +1,7 @@
 name: free_voice_reader
 description: "Free voice reader."
 publish_to: 'none'
-version: 0.0.8+1
+version: 0.0.9+1
 
 environment:
   sdk: ^3.10.3
@@ -16,10 +16,12 @@ dependencies:
   file_picker: ^11.0.2
   scrollable_positioned_list: ^0.3.8
   just_audio: ^0.10.5
+  just_audio_windows: ^0.2.1
   audio_service: ^0.18.18
   flutter_pdfview: ^1.4.4
   syncfusion_flutter_pdf: ^33.2.7
   syncfusion_flutter_pdfviewer: ^33.2.7
+  path: ^1.9.0
 
 
 dev_dependencies:
