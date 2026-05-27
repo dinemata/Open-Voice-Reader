@@ -20,7 +20,7 @@ final bool _isMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   debugPrint('[START] Aplikace startuje...');
-  
+
   try {
     sherpa.initBindings();
     debugPrint('[START] Sherpa bindings OK.');
@@ -134,7 +134,7 @@ class PdfHighlightPainter extends CustomPainter {
     }
   }
   @override
-  bool shouldRepaint(covariant PdfHighlightPainter oldDelegate) => 
+  bool shouldRepaint(covariant PdfHighlightPainter oldDelegate) =>
       oldDelegate.sentenceRects != sentenceRects || oldDelegate.wordRect != wordRect;
 }
 
@@ -253,28 +253,17 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     super.dispose();
   }
 
-  Future<String> _prepareFile(String assetPath, {String? subFolder, String? targetName}) async {
+  Future<String> _prepareFile(String assetPath, {String? targetPath}) async {
     try {
       final byteData = await rootBundle.load(assetPath);
       final directory = await getApplicationSupportDirectory();
-      
-      String destPath = directory.path;
-      if (subFolder != null) {
-        destPath = p.join(destPath, subFolder);
-        final subDir = Directory(destPath);
-        if (!subDir.existsSync()) await subDir.create(recursive: true);
-      }
-      
-      final fileName = targetName ?? p.basename(assetPath);
-      final fullFile = File(p.join(destPath, fileName));
-      
-      await fullFile.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
-      
-      final normalizedPath = fullFile.path.replaceAll('\\', '/');
-      debugPrint('[DEBUG_FILE] OK: $normalizedPath (${fullFile.lengthSync()} bytů)');
-      return normalizedPath;
+      final finalPath = targetPath ?? assetPath;
+      final file = File('${directory.path}/$finalPath');
+      if (!await file.parent.exists()) await file.parent.create(recursive: true);
+      final buffer = byteData.buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes);
+      await file.writeAsBytes(buffer, flush: true);
+      return file.path.replaceAll('\\', '/');
     } catch (e) {
-      debugPrint('[DEBUG_FILE_ERROR] Chyba u $assetPath: $e');
       return "";
     }
   }
@@ -282,97 +271,74 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   Future<void> _initEngine() async {
     if (_isBusy) return;
     debugPrint('[DEBUG_ENGINE] --- START INICIALIZACE ---');
-    debugPrint('[DEBUG_ENGINE] Jazyk: $_currentLang');
     setState(() { _isReady = false; });
 
     try {
-      final dir = await getApplicationSupportDirectory();
-      const esSub = 'espeak-ng-data';
+      final directory = await getApplicationSupportDirectory();
+      const esSub = 'shared-espeak-ng-data';
       final kokoroBaseAsset = 'assets/models/kokoro-en-v0_19';
       final jirkaBaseAsset = 'assets/models/vits-piper-cs_CZ-jirka-medium';
       final esAssetDir = '$kokoroBaseAsset/espeak-ng-data';
 
-      debugPrint('[DEBUG_ENGINE] Příprava espeak-ng složky...');
-      final esFiles = ['phontab', 'phondata', 'phondata-manifest', 'phonindex', 'intonations', 'en_dict'];
-      for (var f in esFiles) {
-        await _prepareFile('$esAssetDir/$f', subFolder: esSub);
-      }
-      await _prepareFile('$jirkaBaseAsset/espeak-ng-data/cs_dict', subFolder: esSub);
-      
-      await _prepareFile('$esAssetDir/lang/gmw/en', subFolder: p.join(esSub, 'lang', 'gmw'));
-      await _prepareFile('$esAssetDir/lang/gmw/en-US', subFolder: p.join(esSub, 'lang', 'gmw'));
+      await _prepareFile('$esAssetDir/phontab', targetPath: '$esSub/phontab');
+      await _prepareFile('$esAssetDir/phondata', targetPath: '$esSub/phondata');
+      await _prepareFile('$esAssetDir/phondata-manifest', targetPath: '$esSub/phondata-manifest');
+      await _prepareFile('$esAssetDir/phonindex', targetPath: '$esSub/phonindex');
+      await _prepareFile('$esAssetDir/intonations', targetPath: '$esSub/intonations');
+      await _prepareFile('$esAssetDir/en_dict', targetPath: '$esSub/en_dict');
+      await _prepareFile('$jirkaBaseAsset/espeak-ng-data/cs_dict', targetPath: '$esSub/cs_dict');
+      await _prepareFile('$esAssetDir/lang/gmw/en', targetPath: '$esSub/lang/gmw/en');
+      await _prepareFile('$esAssetDir/lang/gmw/en-US', targetPath: '$esSub/lang/gmw/en-US');
 
-      final espeakDataPath = p.join(dir.path, esSub).replaceAll('\\', '/');
+      final voicesDir = Directory('${directory.path}/$esSub/voices');
+      if (!await voicesDir.exists()) await voicesDir.create(recursive: true);
+      await File('${voicesDir.path}/cs').writeAsString("name cs\nlanguage cs\n");
+      await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en-us\n");
 
+      final espeakDataPath = '${directory.path}/$esSub'.replaceAll('\\', '/');
       sherpa.OfflineTtsModelConfig modelConfig;
 
       if (_currentLang == 'cs') {
-        debugPrint('[DEBUG_ENGINE] Nastavuji Piper (Jirka)...');
-        final mDir = 'model_cs';
-        final modelPath = await _prepareFile('$jirkaBaseAsset/cs_CZ-jirka-medium.onnx', subFolder: mDir);
-        final configPath = await _prepareFile('$jirkaBaseAsset/cs_CZ-jirka-medium.onnx.json', subFolder: mDir);
-        final tokensPath = await _prepareFile('$jirkaBaseAsset/tokens.txt', subFolder: mDir);
-        
-        if (modelPath.isEmpty || configPath.isEmpty || tokensPath.isEmpty) throw Exception('Chybí soubory pro český model.');
+        final modelPath = await _prepareFile('$jirkaBaseAsset/cs_CZ-jirka-medium.onnx', targetPath: 'cs_CZ-jirka-medium.onnx');
+        await _prepareFile('$jirkaBaseAsset/cs_CZ-jirka-medium.onnx.json', targetPath: 'cs_CZ-jirka-medium.json');
+        final tokensPath = await _prepareFile('$jirkaBaseAsset/tokens.txt', targetPath: 'tokens.txt');
 
         modelConfig = sherpa.OfflineTtsModelConfig(
           vits: sherpa.OfflineTtsVitsModelConfig(
-            model: modelPath, 
-            tokens: tokensPath, 
+            model: modelPath,
+            tokens: tokensPath,
             dataDir: espeakDataPath,
             noiseScale: 0.667,
             noiseScaleW: 0.8,
             lengthScale: 1.0,
           ),
-          numThreads: 1,
+          numThreads: 4,
           debug: true,
         );
       } else {
-        debugPrint('[DEBUG_ENGINE] Nastavuji Kokoro...');
-        final mDir = 'model_en';
-        final modelPath = await _prepareFile('$kokoroBaseAsset/model.onnx', subFolder: mDir);
-        final voicesPath = await _prepareFile('$kokoroBaseAsset/voices.bin', subFolder: mDir);
-        final tokensPath = await _prepareFile('$kokoroBaseAsset/tokens.txt', subFolder: mDir);
-        
-        if (modelPath.isEmpty || voicesPath.isEmpty || tokensPath.isEmpty) throw Exception('Chybí soubory pro anglický model.');
+        final modelPath = await _prepareFile('$kokoroBaseAsset/model.onnx', targetPath: 'model.onnx');
+        final voicesPath = await _prepareFile('$kokoroBaseAsset/voices.bin', targetPath: 'voices.bin');
+        final tokensPath = await _prepareFile('$kokoroBaseAsset/tokens.txt', targetPath: 'tokens.txt');
 
         modelConfig = sherpa.OfflineTtsModelConfig(
           kokoro: sherpa.OfflineTtsKokoroModelConfig(
-            model: modelPath, voices: voicesPath, tokens: tokensPath, dataDir: espeakDataPath
+              model: modelPath, voices: voicesPath, tokens: tokensPath, dataDir: espeakDataPath
           ),
-          numThreads: 1,
+          numThreads: 4,
           debug: true,
         );
       }
 
-      debugPrint('[DEBUG_ENGINE] Uvolňuji předchozí TTS...');
       _tts?.free();
       _tts = null;
-      
       await Future.delayed(const Duration(milliseconds: 100));
 
-      debugPrint('[DEBUG_ENGINE] Volám konstruktor sherpa.OfflineTts...');
       _tts = sherpa.OfflineTts(sherpa.OfflineTtsConfig(model: modelConfig, maxNumSenetences: 1));
-      debugPrint('[DEBUG_ENGINE] TTS inicializován úspěšně.');
-
       if (mounted) setState(() => _isReady = true);
     } catch (e, stack) {
       debugPrint('[DEBUG_ENGINE_ERROR] Fatální chyba při startu TTS: $e');
       debugPrint(stack.toString());
       if (mounted) setState(() { _isReady = false; });
-    }
-  }
-
-  String _sanitizeText(String text) {
-    if (_currentLang == 'cs') {
-      // Piper (cs) padá při neznámých znacích. Povolíme pouze českou abecedu, čísla a interpunkci.
-      // Převod speciálních uvozovek na obyčejné mezery.
-      String clean = text.replaceAll(RegExp(r'[’‘’“”]'), "'");
-      clean = clean.replaceAll(RegExp(r'[^a-zA-ZáčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ0-9\s.,?!:;\-]'), ' ');
-      return clean.replaceAll(RegExp(r'\s+'), ' ').trim();
-    } else {
-      String clean = text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]'), ' ');
-      return clean.replaceAll(RegExp(r'\s+'), ' ').trim();
     }
   }
 
@@ -412,8 +378,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             if (reconstructedWordBounds != null) sentenceWordsCollector.add(PdfWordGeometry(bounds: reconstructedWordBounds, text: cleanWord));
             bool isEndOfSentence = cleanWord.endsWith('.') || cleanWord.endsWith('?') || cleanWord.endsWith('!');
             if (isEndOfSentence || sentenceTextCollector.length > 140) {
-              final formattedText = _sanitizeText(sentenceTextCollector.toString());
-              if (formattedText.length > 1) {
+              final formattedText = sentenceTextCollector.toString().trim();
+              if (formattedText.isNotEmpty) {
                 _chunksMetadata.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
               }
               sentenceTextCollector.clear();
@@ -423,8 +389,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         }
       }
       if (sentenceTextCollector.isNotEmpty) {
-        final formattedText = _sanitizeText(sentenceTextCollector.toString());
-        if (formattedText.length > 1) {
+        final formattedText = sentenceTextCollector.toString().trim();
+        if (formattedText.isNotEmpty) {
           _chunksMetadata.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
         }
       }
@@ -531,7 +497,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     try {
       final rawText = _chunksMetadata[nextIndex].text;
       if (rawText.trim().isEmpty || _tts == null) return;
-      
+
       final sid = (_currentLang == 'en') ? 9 : 0;
       final audio = _tts!.generate(text: rawText, sid: sid);
       final tempDir = await getTemporaryDirectory();
@@ -586,17 +552,25 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       final rawText = _chunksMetadata[_currentChunkIndex].text;
       _scrollToCurrentChunk(_currentChunkIndex);
       if (_showOriginalLayout) _updatePdfVisualHighlights();
-      
+
       String? wavPath = _pregeneratedAudioCache[_currentChunkIndex];
       if (wavPath == null) {
         if (rawText.trim().isEmpty || _tts == null) { _skipToNextFailedChunk(); return; }
         final sid = (_currentLang == 'en') ? 9 : 0;
+
+        debugPrint('[GEN_TRACE] Spouštím generování pro chunk: $_currentChunkIndex');
+        debugPrint('[GEN_TRACE] Délka textu: ${rawText.length} znaků');
+        debugPrint('[GEN_TRACE] Text: "$rawText"');
+
         final audio = _tts!.generate(text: rawText, sid: sid);
+
+        debugPrint('[GEN_TRACE] Generování úspěšné. Vzorků: ${audio.samples.length}');
+
         final tempDir = await getTemporaryDirectory();
         wavPath = p.join(tempDir.path, 'chunk_${_currentChunkIndex}_${DateTime.now().millisecondsSinceEpoch}.wav');
         sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate);
       }
-      
+
       if (_isBusy) {
         if (_isMobile) {
           await _audioHandler.playFile(wavPath, rawText);
@@ -607,8 +581,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         }
         _bufferNextChunkAsync(_currentChunkIndex + 1);
       }
-    } catch (e) {
-      debugPrint('[DEBUG_READ_ERROR] $e');
+    } catch (e, stack) {
+      debugPrint('[DEBUG_READ_ERROR] Zachycená výjimka: $e');
+      debugPrint(stack.toString());
       _skipToNextFailedChunk();
     }
   }
@@ -626,8 +601,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     try {
       final text = _testTexts[_currentLang]!;
       final sid = (_currentLang == 'en') ? 9 : 0;
-      debugPrint('[DEBUG_GEN] Testovací start pro: $text');
+
+      debugPrint('[GEN_TRACE] Spouštím testovací frázi');
+      debugPrint('[GEN_TRACE] Text: "$text"');
+
       final audio = _tts!.generate(text: text, sid: sid);
+
+      debugPrint('[GEN_TRACE] Testovací generování úspěšné. Vzorků: ${audio.samples.length}');
+
       final tempDir = await getTemporaryDirectory();
       final wavPath = p.join(tempDir.path, 'output_${DateTime.now().millisecondsSinceEpoch}.wav');
       if (sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate)) {
@@ -641,8 +622,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       } else {
         setState(() => _isBusy = false);
       }
-    } catch (e) {
-      debugPrint('[DEBUG_TEST_ERROR] $e');
+    } catch (e, stack) {
+      debugPrint('[DEBUG_TEST_ERROR] Zachycená výjimka: $e');
+      debugPrint(stack.toString());
       setState(() => _isBusy = false);
     }
   }
