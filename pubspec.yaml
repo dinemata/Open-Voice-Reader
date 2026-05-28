@@ -1,7 +1,7 @@
 name: free_voice_reader
 description: "Free voice reader."
 publish_to: 'none'
-version: 0.0.9+1
+version: 0.1.0+1
 
 environment:
   sdk: ^3.10.3
@@ -22,6 +22,8 @@ dependencies:
   syncfusion_flutter_pdf: ^33.2.7
   syncfusion_flutter_pdfviewer: ^33.2.7
   path: ^1.9.0
+  shared_preferences: ^2.5.5
+  pdfx: ^2.9.2
 
 
 dev_dependencies:
