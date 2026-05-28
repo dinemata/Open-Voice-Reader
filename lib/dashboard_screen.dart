@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'model.dart';
 import 'speech_test_view.dart';
+import 'main.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -22,6 +23,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List<BookModel> _books = [];
   bool _isLoadingHistory = true;
   bool _isImporting = false;
+
+  double _playbackSpeed = 1.0;
+  double _volume = 1.0;
+  double _preMuteVolume = 1.0;
 
   @override
   void initState() {
@@ -71,7 +76,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         return coverFile.path;
       }
     } catch (e) {
-      debugPrint('[COVER_ERROR] Selhalo generování: $e');
+      debugPrint('[COVER_ERROR] Cover generation failed: $e');
     }
     return null;
   }
@@ -134,7 +139,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _openBook(newBook);
     } catch (e) {
       setState(() => _isImporting = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Chyba importu: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Import error: $e')));
     }
   }
 
@@ -248,8 +253,91 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _saveHistory();
   }
 
+  void _seekRelative(int seconds) async {
+    if (!globalIsAudioBusy) return;
+    final player = (Platform.isAndroid || Platform.isIOS) ? audioHandler.player : windowsPlayer;
+    final currentPos = player.position;
+    final targetPos = currentPos + Duration(seconds: seconds);
+    final duration = player.duration;
+    if (duration != null) {
+      if (targetPos < Duration.zero) {
+        player.seek(Duration.zero);
+      } else if (targetPos > duration) {
+        _skipToNextChunk();
+      } else {
+        player.seek(targetPos);
+      }
+    }
+  }
+
+  void _skipToNextChunk() async {
+    if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
+    setState(() {
+      globalCurrentChunkIndex++;
+      globalCurrentWordIndex = 0;
+    });
+  }
+
+  void _changeSpeed(double speed) async {
+    setState(() { _playbackSpeed = speed; });
+    if (globalIsAudioBusy) {
+      if (Platform.isAndroid || Platform.isIOS) {
+        await audioHandler.player.setSpeed(speed);
+      } else {
+        await windowsPlayer.setSpeed(speed);
+      }
+    }
+  }
+
+  void _changeVolume(double vol) async {
+    setState(() { _volume = vol; });
+    if (Platform.isAndroid || Platform.isIOS) {
+      await audioHandler.player.setVolume(vol);
+    } else {
+      await windowsPlayer.setVolume(vol);
+    }
+  }
+
+  void _toggleMute() {
+    if (_volume > 0.0) {
+      _preMuteVolume = _volume;
+      _changeVolume(0.0);
+    } else {
+      _changeVolume(_preMuteVolume);
+    }
+  }
+
+  void _restartAudioFromBeginning() async {
+    if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
+    setState(() {
+      globalIsAudioBusy = true;
+      globalCurrentChunkIndex = 0;
+      globalCurrentWordIndex = 0;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    BookModel? activeBook;
+    bool isCompleted = false;
+    String statusText = '';
+
+    if (globalActiveBookId != null) {
+      activeBook = _books.firstWhere((b) => b.id == globalActiveBookId, orElse: () => BookModel(id: '', filePath: '', title: 'Unknown document', totalChunks: 1, totalWords: 0));
+      isCompleted = globalCurrentChunkIndex >= activeBook.totalChunks;
+
+      if (isCompleted) {
+        statusText = 'Completed';
+      } else {
+        final bool isTxt = activeBook.filePath.toLowerCase().endsWith('.txt');
+        if (globalIsOriginalLayout && !isTxt) {
+          statusText = 'Page: $globalCurrentPdfPage / $globalTotalPdfPages';
+        } else {
+          statusText = 'Block: ${globalCurrentChunkIndex + 1} / ${activeBook.totalChunks}';
+        }
+      }
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFFF8F9FA),
       appBar: AppBar(
@@ -451,6 +539,154 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ),
                 )],
+          ),
+        ),
+      ),
+      bottomNavigationBar: activeBook == null
+          ? null
+          : Container(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: Colors.grey.shade200, width: 1)),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 10, offset: const Offset(0, -3))],
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          activeBook.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF1F1F1F)),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          statusText,
+                          style: const TextStyle(fontSize: 11, color: Color(0xFF5F6368), fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    decoration: BoxDecoration(color: const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(6)),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<double>(
+                        value: _playbackSpeed,
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F)),
+                        onChanged: (val) {
+                          if (val != null) _changeSpeed(val);
+                        },
+                        items: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0].map((s) => DropdownMenuItem(value: s, child: Text('${s}x'))).toList(),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Stack(
+                alignment: Alignment.center,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.replay_10_rounded, size: 26),
+                        onPressed: globalIsAudioBusy ? () => _seekRelative(-10) : null,
+                      ),
+                      const SizedBox(width: 12),
+                      SizedBox(
+                        width: 48, height: 48,
+                        child: Center(
+                          child: Material(
+                            type: MaterialType.transparency,
+                            child: InkWell(
+                              customBorder: const CircleBorder(),
+                              onTap: () {
+                                if (isCompleted) {
+                                  _restartAudioFromBeginning();
+                                  return;
+                                }
+                                setState(() {
+                                  globalIsAudioBusy = !globalIsAudioBusy;
+                                });
+                                if (!globalIsAudioBusy) {
+                                  if (Platform.isAndroid || Platform.isIOS) audioHandler.stop(); else windowsPlayer.stop();
+                                } else {
+                                  final file = File(activeBook!.filePath);
+                                  if (file.existsSync()) {
+                                    if (Platform.isAndroid || Platform.isIOS) audioHandler.play(); else windowsPlayer.play();
+                                  }
+                                }
+                              },
+                              child: isCompleted
+                                  ? const Icon(Icons.replay_rounded, color: Color(0xFF1A73E8), size: 44)
+                                  : Icon(
+                                globalIsAudioBusy ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded,
+                                color: globalIsAudioBusy ? Colors.red.shade600 : const Color(0xFF1A73E8),
+                                size: 44,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      IconButton(
+                        icon: const Icon(Icons.forward_10_rounded, size: 26),
+                        onPressed: globalIsAudioBusy ? () => _seekRelative(10) : null,
+                      ),
+                    ],
+                  ),
+                  Positioned(
+                    right: 0,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          icon: Icon(
+                            _volume == 0.0
+                                ? Icons.volume_off_rounded
+                                : (_volume < 0.5 ? Icons.volume_down_rounded : Icons.volume_up_rounded),
+                            size: 16,
+                            color: const Color(0xFF5F6368),
+                          ),
+                          onPressed: _toggleMute,
+                        ),
+                        SizedBox(
+                          width: 75,
+                          child: SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                              trackHeight: 2,
+                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 4),
+                              overlayShape: const RoundSliderOverlayShape(overlayRadius: 8),
+                            ),
+                            child: Slider(
+                              value: _volume,
+                              min: 0.0,
+                              max: 1.0,
+                              activeColor: Theme.of(context).colorScheme.primary,
+                              inactiveColor: Colors.grey.shade300,
+                              onChanged: (val) => _changeVolume(val),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       ),

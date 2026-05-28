@@ -18,6 +18,14 @@ import 'package:just_audio/just_audio.dart';
 import 'model.dart';
 import 'main.dart';
 
+int globalCurrentChunkIndex = 0;
+int globalCurrentWordIndex = 0;
+bool globalIsAudioBusy = false;
+String? globalActiveBookId;
+bool globalIsOriginalLayout = false;
+int globalCurrentPdfPage = 1;
+int globalTotalPdfPages = 1;
+
 class SpeechTestView extends StatefulWidget {
   final BookModel book;
   const SpeechTestView({super.key, required this.book});
@@ -33,20 +41,19 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final ValueNotifier<HighlightData> _highlightNotifier = ValueNotifier<HighlightData>(HighlightData(sentenceRects: []));
   final FocusNode _keyboardFocusNode = FocusNode();
 
+  StreamSubscription? _playbackStateSubscription;
+  StreamSubscription? _positionSubscription;
+
   sf.PdfDocument? _loadedDocument;
   Size _pdfViewerSize = Size.zero;
   bool _isReady = false;
-  bool _isBusy = false;
   bool _isParsingPdf = false;
   bool _isBufferingNext = false;
   bool _needsModelSelection = true;
   ModelConfig _selectedModel = availableModels.first;
   final List<PdfChunkMetadata> _chunksMetadata = [];
-  int _currentChunkIndex = 0;
-  int _currentWordIndex = 0;
   int _lastProcessedWordIndex = -1;
   int? _selectedChunkIndex;
-  bool _showOriginalLayout = false;
   bool _isUserScrolling = false;
   bool _isProgrammaticScrolling = false;
   final Map<int, String> _pregeneratedAudioCache = {};
@@ -56,24 +63,40 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   double _pdfZoomFactor = 1.0;
   final double _zoomStep = 0.1;
   final double _minZoom = 0.1;
-  final double _maxZoom = 7.5;
+  final double _maxZoom = 5.0;
 
   double _playbackSpeed = 1.0;
+  double _volume = 1.0;
+  double _preMuteVolume = 1.0;
   bool _isFullscreen = false;
-  int _currentPdfPage = 1;
-  int _totalPdfPages = 1;
   double _parsingProgress = 0.0;
 
   bool _isMaxZoomReached = false;
   bool _isMinZoomReached = false;
 
   bool get _isTxtFile => widget.book.filePath.toLowerCase().endsWith('.txt');
-  double get _currentZoomFactor => _showOriginalLayout ? _pdfZoomFactor : _textZoomFactor;
+  double get _currentZoomFactor => globalIsOriginalLayout ? _pdfZoomFactor : _textZoomFactor;
 
   @override
   void initState() {
     super.initState();
-    _currentChunkIndex = widget.book.lastChunkIndex;
+
+    if (globalActiveBookId == widget.book.id) {
+      _currentChunkIndex = globalCurrentChunkIndex;
+      _currentWordIndex = globalCurrentWordIndex;
+      _isBusy = globalIsAudioBusy;
+    } else {
+      globalActiveBookId = widget.book.id;
+      _currentChunkIndex = widget.book.lastChunkIndex;
+      _currentWordIndex = 0;
+      _isBusy = false;
+      globalCurrentChunkIndex = _currentChunkIndex;
+      globalCurrentWordIndex = _currentWordIndex;
+      globalIsAudioBusy = _isBusy;
+      globalIsOriginalLayout = false;
+      globalCurrentPdfPage = 1;
+      globalTotalPdfPages = 1;
+    }
 
     if (widget.book.lastModelId != null) {
       _needsModelSelection = false;
@@ -82,26 +105,51 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       _initEngineAndLoadPdf();
     }
 
-    _itemPositionsListener.itemPositions.addListener(() {
-      if (_chunksMetadata.isEmpty || _isParsingPdf || _isProgrammaticScrolling || _showOriginalLayout) return;
-      final positions = _itemPositionsListener.itemPositions.value;
-      if (positions.isEmpty) return;
-      bool currentVisible = positions.any((position) => position.index == _currentChunkIndex);
-      if (!currentVisible && !_isUserScrolling) setState(() { _isUserScrolling = true; });
-    });
+    _itemPositionsListener.itemPositions.addListener(_scrollListener);
 
     if (Platform.isAndroid || Platform.isIOS) {
-      audioHandler.playbackState.listen((state) {
+      _playbackStateSubscription = audioHandler.playbackState.listen((state) {
+        if (!mounted) return;
         if (state.processingState == AudioProcessingState.completed && _isBusy) _handleTrackComplete();
       });
-      audioHandler.player.positionStream.listen((p) => _updateWordHighlight(p));
+      _positionSubscription = audioHandler.player.positionStream.listen((p) => _updateWordHighlight(p));
     } else {
-      windowsPlayer.processingStateStream.listen((state) {
+      _playbackStateSubscription = windowsPlayer.processingStateStream.listen((state) {
+        if (!mounted) return;
         if (state == ProcessingState.completed && _isBusy) _handleTrackComplete();
       });
-      windowsPlayer.positionStream.listen((p) => _updateWordHighlight(p));
+      _positionSubscription = windowsPlayer.positionStream.listen((p) => _updateWordHighlight(p));
     }
   }
+
+  @override
+  void dispose() {
+    _itemPositionsListener.itemPositions.removeListener(_scrollListener);
+    _playbackStateSubscription?.cancel();
+    _positionSubscription?.cancel();
+    _highlightNotifier.dispose();
+    _keyboardFocusNode.dispose();
+    _pdfViewerController.dispose();
+    _tts?.free();
+    super.dispose();
+  }
+
+  void _scrollListener() {
+    if (_chunksMetadata.isEmpty || _isParsingPdf || _isProgrammaticScrolling || globalIsOriginalLayout) return;
+    final positions = _itemPositionsListener.itemPositions.value;
+    if (positions.isEmpty) return;
+    bool currentVisible = positions.any((position) => position.index == _currentChunkIndex);
+    if (!currentVisible && !_isUserScrolling) setState(() { _isUserScrolling = true; });
+  }
+
+  int get _currentChunkIndex => globalCurrentChunkIndex;
+  set _currentChunkIndex(int val) => globalCurrentChunkIndex = val;
+
+  int get _currentWordIndex => globalCurrentWordIndex;
+  set _currentWordIndex(int val) => globalCurrentWordIndex = val;
+
+  bool get _isBusy => globalIsAudioBusy;
+  set _isBusy(bool val) => globalIsAudioBusy = val;
 
   Future<void> _selectInitialModel(ModelConfig model) async {
     setState(() {
@@ -134,73 +182,72 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     try {
       final file = File(widget.book.filePath);
-      if (!await file.exists()) throw Exception("Soubor neexistuje.");
+      if (!await file.exists()) throw Exception("File does not exist.");
 
       if (_isTxtFile) {
         final content = await file.readAsString();
-        final parsedChunks = await _parseTxtWithProgress(content);
-        setState(() {
-          _chunksMetadata.clear();
-          _pregeneratedAudioCache.clear();
-          _chunksMetadata.addAll(parsedChunks);
-          if (_chunksMetadata.isEmpty) {
-            _chunksMetadata.add(PdfChunkMetadata(text: "Soubor neobsahuje text.", pageNumber: 1, pdfWords: []));
-          }
-          _totalPdfPages = 1;
-          _isParsingPdf = false;
+        _parseTxtWithProgress(content).listen((progressValue) {
+          if (!mounted) return;
+          setState(() { _parsingProgress = progressValue; });
+        }, onDone: () {
+          if (!mounted) return;
+          setState(() {
+            globalTotalPdfPages = 1;
+            _isParsingPdf = false;
+            if (_chunksMetadata.isEmpty) {
+              _chunksMetadata.add(PdfChunkMetadata(text: "File contains no text.", pageNumber: 1, pdfWords: []));
+            }
+            _recenterToCurrentChunk();
+          });
         });
       } else {
         final bytes = await file.readAsBytes();
         _loadedDocument = sf.PdfDocument(inputBytes: bytes);
-        _totalPdfPages = _loadedDocument!.pages.count;
+        globalTotalPdfPages = _loadedDocument!.pages.count;
 
-        final parsedChunks = await _parsePdfWithProgress(bytes);
-
-        setState(() {
-          _chunksMetadata.clear();
-          _pregeneratedAudioCache.clear();
-          _chunksMetadata.addAll(parsedChunks);
-          if (_chunksMetadata.isEmpty) {
-            _chunksMetadata.add(PdfChunkMetadata(text: "PDF neobsahuje text.", pageNumber: 1, pdfWords: []));
-          }
-          _isParsingPdf = false;
+        _parsePdfWithProgress(bytes).listen((progressValue) {
+          if (!mounted) return;
+          setState(() { _parsingProgress = progressValue; });
+        }, onDone: () {
+          if (!mounted) return;
+          setState(() {
+            _isParsingPdf = false;
+            if (_chunksMetadata.isEmpty) {
+              _chunksMetadata.add(PdfChunkMetadata(text: "PDF contains no text.", pageNumber: 1, pdfWords: []));
+            }
+            if (_chunksMetadata.isNotEmpty && _currentChunkIndex < _chunksMetadata.length) {
+              globalCurrentPdfPage = _chunksMetadata[_currentChunkIndex].pageNumber;
+            }
+            _recenterToCurrentChunk();
+          });
         });
       }
-
-      if (_chunksMetadata.isNotEmpty && _currentChunkIndex < _chunksMetadata.length) {
-        _currentPdfPage = _chunksMetadata[_currentChunkIndex].pageNumber;
-      }
-
-      Future.delayed(const Duration(milliseconds: 300), () {
-        _scrollToCurrentChunk(_currentChunkIndex);
-      });
     } catch (e) {
-      setState(() { _isParsingPdf = false; });
+      if (mounted) setState(() { _isParsingPdf = false; });
     }
   }
 
-  Future<List<PdfChunkMetadata>> _parseTxtWithProgress(String content) async {
-    final List<PdfChunkMetadata> localChunks = [];
+  Stream<double> _parseTxtWithProgress(String content) async* {
+    _chunksMetadata.clear();
+    _pregeneratedAudioCache.clear();
     final List<String> rawSentences = content.split(RegExp(r'(?<=[.!?])\s+'));
     final int total = rawSentences.length;
 
     for (int i = 0; i < total; i++) {
       final clean = rawSentences[i].trim();
       if (clean.isNotEmpty) {
-        localChunks.add(PdfChunkMetadata(text: clean, pageNumber: 1, pdfWords: []));
+        _chunksMetadata.add(PdfChunkMetadata(text: clean, pageNumber: 1, pdfWords: []));
       }
-      if (i % 10 == 0 || i == total - 1) {
-        setState(() {
-          _parsingProgress = (i + 1) / total;
-        });
-        await Future.delayed(Duration.zero);
+      if (i % 5 == 0 || i == total - 1) {
+        yield (i + 1) / total;
+        await Future.delayed(const Duration(milliseconds: 1));
       }
     }
-    return localChunks;
   }
 
-  Future<List<PdfChunkMetadata>> _parsePdfWithProgress(Uint8List bytes) async {
-    final List<PdfChunkMetadata> localChunks = [];
+  Stream<double> _parsePdfWithProgress(Uint8List bytes) async* {
+    _chunksMetadata.clear();
+    _pregeneratedAudioCache.clear();
     final sf.PdfDocument document = sf.PdfDocument(inputBytes: bytes);
     final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
     final int pageCount = document.pages.count;
@@ -239,10 +286,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               sentenceWordsCollector.add(PdfWordGeometry(bounds: reconstructedWordBounds, text: cleanWord));
             }
             bool isEndOfSentence = cleanWord.endsWith('.') || cleanWord.endsWith('?') || cleanWord.endsWith('!');
-            if (isEndOfSentence || sentenceTextCollector.length > 140) {
+            if (isEndOfSentence || sentenceTextCollector.length > 100) {
               final formattedText = sentenceTextCollector.toString().trim();
               if (formattedText.isNotEmpty) {
-                localChunks.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
+                _chunksMetadata.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
               }
               sentenceTextCollector.clear();
               sentenceWordsCollector.clear();
@@ -253,20 +300,17 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       if (sentenceTextCollector.isNotEmpty) {
         final formattedText = sentenceTextCollector.toString().trim();
         if (formattedText.isNotEmpty) {
-          localChunks.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
+          _chunksMetadata.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
         }
       }
-      setState(() {
-        _parsingProgress = (pageIdx + 1) / pageCount;
-      });
-      await Future.delayed(Duration.zero);
+      yield (pageIdx + 1) / pageCount;
+      await Future.delayed(const Duration(milliseconds: 1));
     }
     document.dispose();
-    return localChunks;
   }
 
   void _updateWordHighlight(Duration position) {
-    if (!_isBusy || _chunksMetadata.isEmpty || _currentChunkIndex >= _chunksMetadata.length) return;
+    if (!mounted || !_isBusy || _chunksMetadata.isEmpty || _currentChunkIndex >= _chunksMetadata.length) return;
     final currentChunk = _chunksMetadata[_currentChunkIndex];
     List<String> words = currentChunk.text.split(' ');
     if (words.isEmpty) return;
@@ -275,11 +319,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     double progress = position.inMilliseconds / totalDuration.inMilliseconds;
     int calculatedWordIndex = (progress * words.length).floor();
     if (calculatedWordIndex != _currentWordIndex && calculatedWordIndex < words.length) {
-      _currentWordIndex = calculatedWordIndex;
-      if (_showOriginalLayout && !_isTxtFile) {
+      setState(() { _currentWordIndex = calculatedWordIndex; });
+      if (globalIsOriginalLayout && !_isTxtFile) {
         _updatePdfVisualHighlights();
-      } else {
-        setState(() {});
       }
     }
   }
@@ -355,7 +397,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       final modelPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.modelFile}', targetPath: '${_selectedModel.id}_model.onnx');
       final tokensPath = await _prepareFile('${_selectedModel.assetDir}/tokens.txt', targetPath: '${_selectedModel.id}_tokens.txt');
 
-      if (modelPath.isEmpty || tokensPath.isEmpty) throw Exception("Chyba načítání souborů.");
+      if (modelPath.isEmpty || tokensPath.isEmpty) throw Exception("Error loading assets.");
 
       if (_selectedModel.id == 'en_kokoro') {
         final extraPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: _selectedModel.configFile);
@@ -387,15 +429,22 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _scrollToCurrentChunk(int index) {
-    if (_showOriginalLayout) {
+    if (_chunksMetadata.isEmpty || index >= _chunksMetadata.length) return;
+    if (globalIsOriginalLayout) {
       if (_isUserScrolling) return;
-      if (_chunksMetadata.isNotEmpty && index < _chunksMetadata.length && !_isTxtFile) {
+      if (!_isTxtFile) {
         _isProgrammaticScrolling = true;
-        _pdfViewerController.jumpToPage(_chunksMetadata[index].pageNumber);
+        final chunk = _chunksMetadata[index];
+
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _pdfViewerController.jumpToPage(chunk.pageNumber);
+        });
+
         _isProgrammaticScrolling = false;
       }
     } else {
-      if (_itemScrollController.isAttached && _chunksMetadata.isNotEmpty && !_isUserScrolling) {
+      if (_itemScrollController.isAttached && !_isUserScrolling) {
         _isProgrammaticScrolling = true;
         _itemScrollController.scrollTo(index: index, alignment: 0.1, duration: const Duration(milliseconds: 250), curve: Curves.easeInOutCubic).then((_) => _isProgrammaticScrolling = false);
       }
@@ -403,23 +452,21 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _updatePdfVisualHighlights() {
-    if (_isTxtFile || _loadedDocument == null || !_showOriginalLayout || !_isBusy || _currentChunkIndex >= _chunksMetadata.length || _pdfViewerSize == Size.zero) {
+    if (_isTxtFile || _loadedDocument == null || !globalIsOriginalLayout || _currentChunkIndex >= _chunksMetadata.length || _pdfViewerSize == Size.zero) {
       _clearPdfHighlights();
       return;
     }
-    if (_currentWordIndex == _lastProcessedWordIndex) return;
-    _lastProcessedWordIndex = _currentWordIndex;
     final currentChunk = _chunksMetadata[_currentChunkIndex];
     final int targetPage = currentChunk.pageNumber;
     final sf.PdfPage nativePage = _loadedDocument!.pages[targetPage - 1];
-    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * _pdfZoomFactor * 0.75;
+    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * (_pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor);
     List<Rect> adjustedSentenceRects = [];
     Rect? adjustedWordRect;
     for (int i = 0; i < currentChunk.pdfWords.length; i++) {
       final pdfWord = currentChunk.pdfWords[i];
       final scaledRect = Rect.fromLTWH(pdfWord.bounds.left * scaleFactor, pdfWord.bounds.top * scaleFactor, pdfWord.bounds.width * scaleFactor, pdfWord.bounds.height * scaleFactor);
       adjustedSentenceRects.add(scaledRect);
-      if (i == _currentWordIndex) adjustedWordRect = scaledRect;
+      if (_isBusy && i == _currentWordIndex) adjustedWordRect = scaledRect;
     }
     _highlightNotifier.value = HighlightData(sentenceRects: adjustedSentenceRects, wordRect: adjustedWordRect);
   }
@@ -430,11 +477,19 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _handlePdfTap(TapUpDetails d) {
-    if (_isTxtFile || !_showOriginalLayout || _chunksMetadata.isEmpty || _pdfViewerSize == Size.zero) return;
+    if (_isTxtFile || !globalIsOriginalLayout || _chunksMetadata.isEmpty || _pdfViewerSize == Size.zero) return;
     final int currentPage = _pdfViewerController.pageNumber;
     final sf.PdfPage nativePage = _loadedDocument!.pages[currentPage - 1];
-    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * _pdfZoomFactor * 0.75;
-    final Offset pdfPointsPos = Offset(d.localPosition.dx / scaleFactor, d.localPosition.dy / scaleFactor);
+    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * (_pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor);
+
+    double actualX = d.localPosition.dx;
+    double actualY = d.localPosition.dy;
+    if (_pdfZoomFactor < 1.0) {
+      actualX /= _pdfZoomFactor;
+      actualY /= _pdfZoomFactor;
+    }
+
+    final Offset pdfPointsPos = Offset(actualX / scaleFactor, actualY / scaleFactor);
     for (int chunkIdx = 0; chunkIdx < _chunksMetadata.length; chunkIdx++) {
       final chunk = _chunksMetadata[chunkIdx];
       if (chunk.pageNumber != currentPage) continue;
@@ -470,7 +525,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   void _recenterToCurrentChunk() {
     setState(() { _isUserScrolling = false; });
     _scrollToCurrentChunk(_currentChunkIndex);
-    if (_showOriginalLayout && !_isTxtFile) _updatePdfVisualHighlights();
+    if (globalIsOriginalLayout && !_isTxtFile) _updatePdfVisualHighlights();
   }
 
   void _startPdfReading() {
@@ -482,7 +537,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   void _stopPdfReading() async {
     setState(() { _isBusy = false; });
     if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
-    _clearPdfHighlights();
+    _updatePdfVisualHighlights();
+  }
+
+  void _restartAudioFromBeginning() async {
+    setState(() { _isBusy = true; _isUserScrolling = false; _currentChunkIndex = 0; _currentWordIndex = 0; _lastProcessedWordIndex = -1; });
+    if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
+    _saveCurrentProgress();
+    _executeChunkReading();
   }
 
   void _jumpToSelectedAndPlay() async {
@@ -496,13 +558,16 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   void _executeChunkReading() async {
     if (_currentChunkIndex >= _chunksMetadata.length || !_isBusy) {
-      setState(() { _isBusy = false; });
+      if (mounted) setState(() { _isBusy = false; });
       return;
     }
     try {
       final rawText = _chunksMetadata[_currentChunkIndex].text;
       _scrollToCurrentChunk(_currentChunkIndex);
-      if (_showOriginalLayout && !_isTxtFile) {
+      if (globalIsOriginalLayout && !_isTxtFile) {
+        setState(() {
+          globalCurrentPdfPage = _chunksMetadata[_currentChunkIndex].pageNumber;
+        });
         _updatePdfVisualHighlights();
       }
 
@@ -519,6 +584,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         if (Platform.isAndroid || Platform.isIOS) {
           await audioHandler.playFile(wavPath, rawText);
         } else {
+          await windowsPlayer.setVolume(_volume);
           await windowsPlayer.setSpeed(_playbackSpeed);
           await windowsPlayer.setFilePath(wavPath);
           await Future.delayed(const Duration(milliseconds: 150));
@@ -541,18 +607,22 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   void _changeZoom(double delta) {
     setState(() {
-      if (_showOriginalLayout) {
+      if (globalIsOriginalLayout) {
         _pdfZoomFactor = (_pdfZoomFactor + delta).clamp(_minZoom, _maxZoom);
-        _pdfViewerController.zoomLevel = _pdfZoomFactor * 2.0;
+        _pdfViewerController.zoomLevel = _pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor;
+        _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
+        _isMinZoomReached = _pdfZoomFactor <= _minZoom;
       } else {
         _textZoomFactor = (_textZoomFactor + delta).clamp(_minZoom, _maxZoom);
+        _isMaxZoomReached = _textZoomFactor >= _maxZoom;
+        _isMinZoomReached = _textZoomFactor <= _minZoom;
       }
     });
     if (!_isUserScrolling) {
       Future.delayed(const Duration(milliseconds: 50), () {
         _recenterToCurrentChunk();
       });
-    } else if (_showOriginalLayout && !_isTxtFile) {
+    } else if (globalIsOriginalLayout && !_isTxtFile) {
       _updatePdfVisualHighlights();
     }
   }
@@ -575,15 +645,31 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _changeSpeed(double speed) async {
-    setState(() {
-      _playbackSpeed = speed;
-    });
+    setState(() { _playbackSpeed = speed; });
     if (_isBusy) {
       if (Platform.isAndroid || Platform.isIOS) {
         await audioHandler.player.setSpeed(speed);
       } else {
         await windowsPlayer.setSpeed(speed);
       }
+    }
+  }
+
+  void _changeVolume(double vol) async {
+    setState(() { _volume = vol; });
+    if (Platform.isAndroid || Platform.isIOS) {
+      await audioHandler.player.setVolume(vol);
+    } else {
+      await windowsPlayer.setVolume(vol);
+    }
+  }
+
+  void _toggleMute() {
+    if (_volume > 0.0) {
+      _preMuteVolume = _volume;
+      _changeVolume(0.0);
+    } else {
+      _changeVolume(_preMuteVolume);
     }
   }
 
@@ -610,7 +696,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   @override
   Widget build(BuildContext context) {
-    double progress = _chunksMetadata.isEmpty ? 0.0 : _currentChunkIndex / _chunksMetadata.length;
+    bool isCompleted = _chunksMetadata.isNotEmpty && _currentChunkIndex >= _chunksMetadata.length;
+    double progress = _chunksMetadata.isEmpty ? 0.0 : (isCompleted ? 1.0 : _currentChunkIndex / _chunksMetadata.length);
     bool showJumpButton = _selectedChunkIndex != null;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -693,12 +780,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                 TextButton.icon(
                   style: TextButton.styleFrom(foregroundColor: const Color(0xFF1A73E8)),
                   onPressed: () {
-                    setState(() => _showOriginalLayout = !_showOriginalLayout);
+                    setState(() => globalIsOriginalLayout = !globalIsOriginalLayout);
                     _scrollToCurrentChunk(_currentChunkIndex);
-                    if (_showOriginalLayout) _updatePdfVisualHighlights(); else _clearPdfHighlights();
+                    if (globalIsOriginalLayout) _updatePdfVisualHighlights(); else _clearPdfHighlights();
                   },
-                  icon: Icon(_showOriginalLayout ? Icons.picture_as_pdf : Icons.text_fields_rounded, size: 20),
-                  label: Text(_showOriginalLayout ? 'Původní PDF' : 'Čistý text', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                  icon: Icon(globalIsOriginalLayout ? Icons.picture_as_pdf : Icons.text_fields_rounded, size: 20),
+                  label: Text(globalIsOriginalLayout ? 'Původní PDF' : 'Čistý text', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
                 )
               else
                 const Padding(
@@ -819,7 +906,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                     child: Align(
                                       alignment: Alignment.centerLeft,
                                       child: AnimatedContainer(
-                                        duration: const Duration(milliseconds: 100),
+                                        duration: const Duration(milliseconds: 60),
                                         width: 240 * _parsingProgress,
                                         height: 4,
                                         decoration: BoxDecoration(
@@ -833,7 +920,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                               ),
                             )
                                 : IndexedStack(
-                              index: (_showOriginalLayout && !_isTxtFile) ? 1 : 0,
+                              index: (globalIsOriginalLayout && !_isTxtFile) ? 1 : 0,
                               children: [
                                 Padding(
                                   padding: const EdgeInsets.all(8.0),
@@ -842,7 +929,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                     itemPositionsListener: _itemPositionsListener,
                                     itemCount: _chunksMetadata.length,
                                     itemBuilder: (context, index) {
-                                      bool isCurrent = _isBusy && index == _currentChunkIndex;
+                                      bool isCurrent = index == _currentChunkIndex;
                                       bool isSelected = index == _selectedChunkIndex;
                                       return InkWell(
                                         onTap: () => setState(() { _selectedChunkIndex = index; }),
@@ -852,13 +939,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                           margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
                                           padding: const EdgeInsets.all(12),
                                           decoration: BoxDecoration(
-                                            color: isCurrent
+                                            color: (_isBusy && isCurrent)
                                                 ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3)
                                                 : (isSelected ? Colors.orange.shade50 : Colors.transparent),
                                             borderRadius: BorderRadius.circular(8),
-                                            border: isSelected ? Border.all(color: Colors.orange.shade400, width: 1.5) : null,
+                                            border: isCurrent
+                                                ? Border.all(color: Theme.of(context).colorScheme.primary, width: 1.5)
+                                                : (isSelected ? Border.all(color: Colors.orange.shade400, width: 1.5) : null),
                                           ),
-                                          child: isCurrent
+                                          child: (_isBusy && isCurrent)
                                               ? RichText(
                                             text: TextSpan(
                                               style: TextStyle(fontSize: 17 * _textZoomFactor, height: 1.6, color: Colors.black87),
@@ -878,61 +967,76 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                   ),
                                 ),
                                 if (!_isTxtFile)
-                                  NotificationListener<ScrollNotification>(
-                                    onNotification: (notification) {
-                                      if (notification is ScrollUpdateNotification && !_isProgrammaticScrolling) {
-                                        if (!_isUserScrolling) {
-                                          setState(() { _isUserScrolling = true; });
+                                  Listener(
+                                    onPointerSignal: _handlePointerSignal,
+                                    child: NotificationListener<ScrollNotification>(
+                                      onNotification: (notification) {
+                                        if (!_isProgrammaticScrolling && (notification is ScrollUpdateNotification || notification is OverscrollNotification)) {
+                                          if (!_isUserScrolling) {
+                                            setState(() { _isUserScrolling = true; });
+                                          }
                                         }
-                                      }
-                                      return false;
-                                    },
-                                    child: LayoutBuilder(
-                                      builder: (context, constraints) {
-                                        _pdfViewerSize = Size(constraints.maxWidth, constraints.maxHeight);
-                                        return GestureDetector(
-                                          onTapUp: _handlePdfTap,
-                                          child: Stack(
-                                            children: [
-                                              SfPdfViewer.file(
-                                                File(widget.book.filePath),
-                                                controller: _pdfViewerController,
-                                                pageLayoutMode: PdfPageLayoutMode.continuous,
-                                                canShowScrollHead: false, canShowTextSelectionMenu: false,
-                                                enableDoubleTapZooming: true, enableDocumentLinkAnnotation: true,
-                                                onDocumentLoaded: (details) {
-                                                  _pdfViewerController.zoomLevel = _pdfZoomFactor * 2.0;
-                                                },
-                                                onPageChanged: (details) {
-                                                  setState(() {
-                                                    _currentPdfPage = details.newPageNumber;
-                                                  });
-                                                },
-                                                onZoomLevelChanged: (details) {
-                                                  setState(() {
-                                                    _isMaxZoomReached = details.newZoomLevel >= (_maxZoom * 2.0);
-                                                    _isMinZoomReached = details.newZoomLevel <= (_minZoom * 2.0);
-                                                    _pdfZoomFactor = details.newZoomLevel / 2.0;
-                                                  });
-                                                  _updatePdfVisualHighlights();
-                                                },
-                                              ),
-                                              IgnorePointer(
-                                                child: ValueListenableBuilder<HighlightData>(
-                                                  valueListenable: _highlightNotifier,
-                                                  builder: (context, data, _) => CustomPaint(
-                                                    size: Size.infinite,
-                                                    painter: PdfHighlightPainter(
-                                                      sentenceRects: data.sentenceRects, wordRect: data.wordRect,
-                                                      primaryColor: Theme.of(context).colorScheme.primary,
+                                        return false;
+                                      },
+                                      child: LayoutBuilder(
+                                        builder: (context, constraints) {
+                                          _pdfViewerSize = Size(constraints.maxWidth, constraints.maxHeight);
+                                          return GestureDetector(
+                                            behavior: HitTestBehavior.opaque,
+                                            onTapUp: _handlePdfTap,
+                                            child: FractionallySizedBox(
+                                              widthFactor: _pdfZoomFactor < 1.0 ? _pdfZoomFactor : 1.0,
+                                              heightFactor: _pdfZoomFactor < 1.0 ? _pdfZoomFactor : 1.0,
+                                              alignment: Alignment.topCenter,
+                                              child: Stack(
+                                                children: [
+                                                  SfPdfViewer.file(
+                                                    File(widget.book.filePath),
+                                                    controller: _pdfViewerController,
+                                                    pageLayoutMode: PdfPageLayoutMode.continuous,
+                                                    canShowScrollHead: false, canShowTextSelectionMenu: false,
+                                                    enableDoubleTapZooming: _pdfZoomFactor >= 1.0,
+                                                    enableDocumentLinkAnnotation: true,
+                                                    onTextSelectionChanged: null,
+                                                    onDocumentLoaded: (details) {
+                                                      _pdfViewerController.zoomLevel = _pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor;
+                                                      _updatePdfVisualHighlights();
+                                                    },
+                                                    onPageChanged: (details) {
+                                                      setState(() {
+                                                        globalCurrentPdfPage = details.newPageNumber;
+                                                      });
+                                                    },
+                                                    onZoomLevelChanged: (details) {
+                                                      setState(() {
+                                                        _pdfZoomFactor = details.newZoomLevel;
+                                                        _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
+                                                        _isMinZoomReached = _pdfZoomFactor <= _minZoom;
+                                                      });
+                                                      _updatePdfVisualHighlights();
+                                                    },
+                                                  ),
+                                                  IgnorePointer(
+                                                    child: ValueListenableBuilder<HighlightData>(
+                                                      valueListenable: _highlightNotifier,
+                                                      builder: (context, data, _) => CustomPaint(
+                                                        size: Size.infinite,
+                                                        painter: PdfHighlightPainter(
+                                                          sentenceRects: data.sentenceRects,
+                                                          wordRect: data.wordRect,
+                                                          primaryColor: _isBusy
+                                                              ? Theme.of(context).colorScheme.primary
+                                                              : Theme.of(context).colorScheme.primary.withOpacity(0.5),
+                                                        ),
+                                                      ),
                                                     ),
                                                   ),
-                                                ),
+                                                ],
                                               ),
-                                            ],
-                                          ),
-                                        );
-                                      },
+                                            ),
+                                          );
+                                        },
+                                      ),
                                     ),
                                   )
                                 else
@@ -975,12 +1079,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         children: [
                           Row(
                             children: [
-                              const Icon(Icons.grid_view_rounded, size: 14, color: Colors.grey),
+                              const Icon(Icons.auto_stories_rounded, size: 14, color: Colors.grey),
                               const SizedBox(width: 6),
                               Text(
-                                  (_showOriginalLayout && !_isTxtFile)
-                                      ? 'Stránka: $_currentPdfPage / $_totalPdfPages'
-                                      : 'Blok: ${_currentChunkIndex + 1} / ${_chunksMetadata.length}',
+                                  isCompleted
+                                      ? 'Completed'
+                                      : ((globalIsOriginalLayout && !_isTxtFile)
+                                      ? 'Page: $globalCurrentPdfPage / $globalTotalPdfPages'
+                                      : 'Block: ${_currentChunkIndex + 1} / ${_chunksMetadata.length}'),
                                   style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368), fontWeight: FontWeight.w600)
                               ),
                             ],
@@ -1008,45 +1114,94 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                       child: LinearProgressIndicator(value: progress, backgroundColor: Colors.grey.shade200, color: Theme.of(context).colorScheme.primary, minHeight: 6),
                     ),
                     const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    Stack(
+                      alignment: Alignment.center,
                       children: [
-                        IconButton(
-                          icon: const Icon(Icons.replay_10_rounded, size: 28),
-                          onPressed: _isBusy ? () => _seekRelative(-10) : null,
-                        ),
-                        const SizedBox(width: 16),
-                        SizedBox(
-                          width: 64, height: 64,
-                          child: Center(
-                            child: Material(
-                              type: MaterialType.transparency,
-                              child: InkWell(
-                                customBorder: const CircleBorder(),
-                                onTap: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
-                                child: showJumpButton
-                                    ? IconButton(
-                                  padding: EdgeInsets.zero,
-                                  icon: Icon(Icons.play_circle_filled_rounded, color: Colors.orange.shade700, size: 54),
-                                  onPressed: _jumpToSelectedAndPlay,
-                                )
-                                    : IconButton(
-                                  padding: EdgeInsets.zero,
-                                  icon: Icon(
-                                    _isBusy ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded,
-                                    color: _isBusy ? Colors.red.shade600 : const Color(0xFF1A73E8),
-                                    size: 54,
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.replay_10_rounded, size: 28),
+                              onPressed: _isBusy ? () => _seekRelative(-10) : null,
+                            ),
+                            const SizedBox(width: 16),
+                            SizedBox(
+                              width: 64, height: 64,
+                              child: Center(
+                                child: Material(
+                                  type: MaterialType.transparency,
+                                  child: InkWell(
+                                    customBorder: const CircleBorder(),
+                                    onTap: _isReady ? (isCompleted ? _restartAudioFromBeginning : (_isBusy ? _stopPdfReading : _startPdfReading)) : null,
+                                    child: showJumpButton
+                                        ? IconButton(
+                                      padding: EdgeInsets.zero,
+                                      icon: Icon(Icons.play_circle_filled_rounded, color: Colors.orange.shade700, size: 54),
+                                      onPressed: _jumpToSelectedAndPlay,
+                                    )
+                                        : (isCompleted
+                                        ? IconButton(
+                                      padding: EdgeInsets.zero,
+                                      icon: const Icon(Icons.replay_rounded, color: Color(0xFF1A73E8), size: 54),
+                                      onPressed: _restartAudioFromBeginning,
+                                    )
+                                        : IconButton(
+                                      padding: EdgeInsets.zero,
+                                      icon: Icon(
+                                        _isBusy ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded,
+                                        color: _isBusy ? Colors.red.shade600 : const Color(0xFF1A73E8),
+                                        size: 54,
+                                      ),
+                                      onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
+                                    )),
                                   ),
-                                  onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
                                 ),
                               ),
                             ),
-                          ),
+                            const SizedBox(width: 16),
+                            IconButton(
+                              icon: const Icon(Icons.forward_10_rounded, size: 28),
+                              onPressed: _isBusy ? () => _seekRelative(10) : null,
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 16),
-                        IconButton(
-                          icon: const Icon(Icons.forward_10_rounded, size: 28),
-                          onPressed: _isBusy ? () => _seekRelative(10) : null,
+                        Positioned(
+                          right: 0,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                                icon: Icon(
+                                  _volume == 0.0
+                                      ? Icons.volume_off_rounded
+                                      : (_volume < 0.5 ? Icons.volume_down_rounded : Icons.volume_up_rounded),
+                                  size: 18,
+                                  color: const Color(0xFF5F6368),
+                                ),
+                                onPressed: _toggleMute,
+                              ),
+                              SizedBox(
+                                width: 90,
+                                child: SliderTheme(
+                                  data: SliderTheme.of(context).copyWith(
+                                    trackHeight: 3,
+                                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                                  ),
+                                  child: Slider(
+                                    value: _volume,
+                                    min: 0.0,
+                                    max: 1.0,
+                                    activeColor: Theme.of(context).colorScheme.primary,
+                                    inactiveColor: Colors.grey.shade300,
+                                    onChanged: (val) => _changeVolume(val),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
@@ -1075,6 +1230,6 @@ class DynamicPositionsParserIndicator extends StatelessWidget {
   const DynamicPositionsParserIndicator({super.key});
   @override
   Widget build(BuildContext context) {
-    return const Column(mainAxisAlignment: MainAxisAlignment.center, children: [CircularProgressIndicator(strokeWidth: 3), SizedBox(height: 20), Text('Načítám text a strukturu dokumentu...', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: 13))]);
+    return const Column(mainAxisAlignment: MainAxisAlignment.center, children: [CircularProgressIndicator(strokeWidth: 3), SizedBox(height: 20), Text('Loading text and asset maps...', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: 13))]);
   }
 }
