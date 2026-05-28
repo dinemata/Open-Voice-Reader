@@ -52,12 +52,23 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final Map<int, String> _pregeneratedAudioCache = {};
   final String _cleanupMode = 'chytreParsovani';
 
-  double _currentZoomFactor = 1.0;
+  double _textZoomFactor = 1.0;
+  double _pdfZoomFactor = 1.0;
   final double _zoomStep = 0.1;
-  final double _minZoom = 0.4;
-  final double _maxZoom = 4.0;
+  final double _minZoom = 0.1;
+  final double _maxZoom = 7.5;
+
+  double _playbackSpeed = 1.0;
+  bool _isFullscreen = false;
+  int _currentPdfPage = 1;
+  int _totalPdfPages = 1;
+  double _parsingProgress = 0.0;
+
+  bool _isMaxZoomReached = false;
+  bool _isMinZoomReached = false;
 
   bool get _isTxtFile => widget.book.filePath.toLowerCase().endsWith('.txt');
+  double get _currentZoomFactor => _showOriginalLayout ? _pdfZoomFactor : _textZoomFactor;
 
   @override
   void initState() {
@@ -116,6 +127,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     setState(() {
       _isParsingPdf = true;
       _isReady = false;
+      _parsingProgress = 0.0;
     });
 
     await _initEngine();
@@ -126,7 +138,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
       if (_isTxtFile) {
         final content = await file.readAsString();
-        final parsedChunks = await compute(_parseTxtInBackground, {'content': content});
+        final parsedChunks = await _parseTxtWithProgress(content);
         setState(() {
           _chunksMetadata.clear();
           _pregeneratedAudioCache.clear();
@@ -134,16 +146,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           if (_chunksMetadata.isEmpty) {
             _chunksMetadata.add(PdfChunkMetadata(text: "Soubor neobsahuje text.", pageNumber: 1, pdfWords: []));
           }
+          _totalPdfPages = 1;
           _isParsingPdf = false;
         });
       } else {
         final bytes = await file.readAsBytes();
         _loadedDocument = sf.PdfDocument(inputBytes: bytes);
+        _totalPdfPages = _loadedDocument!.pages.count;
 
-        final parsedChunks = await compute(_parsePdfInBackground, {
-          'bytes': bytes,
-          'cleanupMode': _cleanupMode,
-        });
+        final parsedChunks = await _parsePdfWithProgress(bytes);
 
         setState(() {
           _chunksMetadata.clear();
@@ -156,6 +167,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         });
       }
 
+      if (_chunksMetadata.isNotEmpty && _currentChunkIndex < _chunksMetadata.length) {
+        _currentPdfPage = _chunksMetadata[_currentChunkIndex].pageNumber;
+      }
+
       Future.delayed(const Duration(milliseconds: 300), () {
         _scrollToCurrentChunk(_currentChunkIndex);
       });
@@ -164,29 +179,33 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
   }
 
-  static List<PdfChunkMetadata> _parseTxtInBackground(Map<String, dynamic> args) {
-    final String content = args['content'];
+  Future<List<PdfChunkMetadata>> _parseTxtWithProgress(String content) async {
     final List<PdfChunkMetadata> localChunks = [];
     final List<String> rawSentences = content.split(RegExp(r'(?<=[.!?])\s+'));
+    final int total = rawSentences.length;
 
-    for (var sentence in rawSentences) {
-      final clean = sentence.trim();
+    for (int i = 0; i < total; i++) {
+      final clean = rawSentences[i].trim();
       if (clean.isNotEmpty) {
         localChunks.add(PdfChunkMetadata(text: clean, pageNumber: 1, pdfWords: []));
+      }
+      if (i % 10 == 0 || i == total - 1) {
+        setState(() {
+          _parsingProgress = (i + 1) / total;
+        });
+        await Future.delayed(Duration.zero);
       }
     }
     return localChunks;
   }
 
-  static List<PdfChunkMetadata> _parsePdfInBackground(Map<String, dynamic> args) {
-    final Uint8List bytes = args['bytes'];
-    final String cleanupMode = args['cleanupMode'];
+  Future<List<PdfChunkMetadata>> _parsePdfWithProgress(Uint8List bytes) async {
     final List<PdfChunkMetadata> localChunks = [];
-
     final sf.PdfDocument document = sf.PdfDocument(inputBytes: bytes);
     final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
+    final int pageCount = document.pages.count;
 
-    for (int pageIdx = 0; pageIdx < document.pages.count; pageIdx++) {
+    for (int pageIdx = 0; pageIdx < pageCount; pageIdx++) {
       final List<sf.TextLine> textLines = extractor.extractTextLines(startPageIndex: pageIdx, endPageIndex: pageIdx);
       List<PdfWordGeometry> sentenceWordsCollector = [];
       StringBuffer sentenceTextCollector = StringBuffer();
@@ -207,7 +226,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             String cleanWord = reconstructedWordText.toString().trim();
             reconstructedWordText.clear();
             if (cleanWord.isEmpty) continue;
-            if (cleanupMode == 'chytreParsovani') {
+            if (_cleanupMode == 'chytreParsovani') {
               if (cleanWord.contains(RegExp(r'https?://\S+|www\.\S+'))) continue;
               if (RegExp(r'^\d+$').hasMatch(cleanWord) || RegExp(r'^\[\d+\]$').hasMatch(cleanWord)) continue;
             }
@@ -237,6 +256,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           localChunks.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
         }
       }
+      setState(() {
+        _parsingProgress = (pageIdx + 1) / pageCount;
+      });
+      await Future.delayed(Duration.zero);
     }
     document.dispose();
     return localChunks;
@@ -364,14 +387,18 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _scrollToCurrentChunk(int index) {
-    if (_itemScrollController.isAttached && _chunksMetadata.isNotEmpty && !_isUserScrolling && !_showOriginalLayout) {
-      _isProgrammaticScrolling = true;
-      _itemScrollController.scrollTo(index: index, alignment: 0.1, duration: const Duration(milliseconds: 250), curve: Curves.easeInOutCubic).then((_) => _isProgrammaticScrolling = false);
-    }
-    if (_chunksMetadata.isNotEmpty && index < _chunksMetadata.length && _showOriginalLayout && !_isTxtFile) {
-      _isProgrammaticScrolling = true;
-      _pdfViewerController.jumpToPage(_chunksMetadata[index].pageNumber);
-      _isProgrammaticScrolling = false;
+    if (_showOriginalLayout) {
+      if (_isUserScrolling) return;
+      if (_chunksMetadata.isNotEmpty && index < _chunksMetadata.length && !_isTxtFile) {
+        _isProgrammaticScrolling = true;
+        _pdfViewerController.jumpToPage(_chunksMetadata[index].pageNumber);
+        _isProgrammaticScrolling = false;
+      }
+    } else {
+      if (_itemScrollController.isAttached && _chunksMetadata.isNotEmpty && !_isUserScrolling) {
+        _isProgrammaticScrolling = true;
+        _itemScrollController.scrollTo(index: index, alignment: 0.1, duration: const Duration(milliseconds: 250), curve: Curves.easeInOutCubic).then((_) => _isProgrammaticScrolling = false);
+      }
     }
   }
 
@@ -385,7 +412,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     final currentChunk = _chunksMetadata[_currentChunkIndex];
     final int targetPage = currentChunk.pageNumber;
     final sf.PdfPage nativePage = _loadedDocument!.pages[targetPage - 1];
-    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * _currentZoomFactor;
+    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * _pdfZoomFactor * 0.75;
     List<Rect> adjustedSentenceRects = [];
     Rect? adjustedWordRect;
     for (int i = 0; i < currentChunk.pdfWords.length; i++) {
@@ -406,7 +433,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (_isTxtFile || !_showOriginalLayout || _chunksMetadata.isEmpty || _pdfViewerSize == Size.zero) return;
     final int currentPage = _pdfViewerController.pageNumber;
     final sf.PdfPage nativePage = _loadedDocument!.pages[currentPage - 1];
-    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * _currentZoomFactor;
+    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * _pdfZoomFactor * 0.75;
     final Offset pdfPointsPos = Offset(d.localPosition.dx / scaleFactor, d.localPosition.dy / scaleFactor);
     for (int chunkIdx = 0; chunkIdx < _chunksMetadata.length; chunkIdx++) {
       final chunk = _chunksMetadata[chunkIdx];
@@ -475,7 +502,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     try {
       final rawText = _chunksMetadata[_currentChunkIndex].text;
       _scrollToCurrentChunk(_currentChunkIndex);
-      if (_showOriginalLayout && !_isTxtFile) _updatePdfVisualHighlights();
+      if (_showOriginalLayout && !_isTxtFile) {
+        _updatePdfVisualHighlights();
+      }
 
       String? wavPath = _pregeneratedAudioCache[_currentChunkIndex];
       if (wavPath == null) {
@@ -490,6 +519,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         if (Platform.isAndroid || Platform.isIOS) {
           await audioHandler.playFile(wavPath, rawText);
         } else {
+          await windowsPlayer.setSpeed(_playbackSpeed);
           await windowsPlayer.setFilePath(wavPath);
           await Future.delayed(const Duration(milliseconds: 150));
           windowsPlayer.play();
@@ -511,10 +541,50 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   void _changeZoom(double delta) {
     setState(() {
-      _currentZoomFactor = (_currentZoomFactor + delta).clamp(_minZoom, _maxZoom);
-      _pdfViewerController.zoomLevel = _currentZoomFactor;
-      if (_showOriginalLayout && !_isTxtFile) _updatePdfVisualHighlights();
+      if (_showOriginalLayout) {
+        _pdfZoomFactor = (_pdfZoomFactor + delta).clamp(_minZoom, _maxZoom);
+        _pdfViewerController.zoomLevel = _pdfZoomFactor * 2.0;
+      } else {
+        _textZoomFactor = (_textZoomFactor + delta).clamp(_minZoom, _maxZoom);
+      }
     });
+    if (!_isUserScrolling) {
+      Future.delayed(const Duration(milliseconds: 50), () {
+        _recenterToCurrentChunk();
+      });
+    } else if (_showOriginalLayout && !_isTxtFile) {
+      _updatePdfVisualHighlights();
+    }
+  }
+
+  void _seekRelative(int seconds) async {
+    if (!_isBusy) return;
+    final player = (Platform.isAndroid || Platform.isIOS) ? audioHandler.player : windowsPlayer;
+    final currentPos = player.position;
+    final targetPos = currentPos + Duration(seconds: seconds);
+    final duration = player.duration;
+    if (duration != null) {
+      if (targetPos < Duration.zero) {
+        player.seek(Duration.zero);
+      } else if (targetPos > duration) {
+        _handleTrackComplete();
+      } else {
+        player.seek(targetPos);
+      }
+    }
+  }
+
+  void _changeSpeed(double speed) async {
+    setState(() {
+      _playbackSpeed = speed;
+    });
+    if (_isBusy) {
+      if (Platform.isAndroid || Platform.isIOS) {
+        await audioHandler.player.setSpeed(speed);
+      } else {
+        await windowsPlayer.setSpeed(speed);
+      }
+    }
   }
 
   void _handlePointerSignal(PointerSignalEvent event) {
@@ -548,336 +618,447 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     });
 
     return CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.arrowUp, control: true): () => _changeZoom(_zoomStep),
-          const SingleActivator(LogicalKeyboardKey.arrowDown, control: true): () => _changeZoom(-_zoomStep),
-        },
-        child: Focus(
-          focusNode: _keyboardFocusNode,
-          child: Scaffold(
-            backgroundColor: const Color(0xFFF8F9FA),
-            appBar: _needsModelSelection
-                ? null
-                : AppBar(
-              automaticallyImplyLeading: true,
-              elevation: 0,
-              backgroundColor: Colors.white,
-              surfaceTintColor: Colors.transparent,
-              shape: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1)),
-              titleSpacing: 0,
-              title: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      widget.book.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1F1F1F)),
-                    ),
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.arrowUp, control: true): () => _changeZoom(_zoomStep),
+        const SingleActivator(LogicalKeyboardKey.arrowDown, control: true): () => _changeZoom(-_zoomStep),
+      },
+      child: Focus(
+        focusNode: _keyboardFocusNode,
+        child: Scaffold(
+          backgroundColor: const Color(0xFFF8F9FA),
+          appBar: (_needsModelSelection || _isFullscreen)
+              ? null
+              : AppBar(
+            automaticallyImplyLeading: true,
+            elevation: 0,
+            backgroundColor: Colors.white,
+            surfaceTintColor: Colors.transparent,
+            shape: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1)),
+            titleSpacing: 0,
+            title: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.book.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1F1F1F)),
                   ),
-                  const SizedBox(width: 12),
-                  Container(
-                    width: 190,
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(8)),
-                    child: DropdownButtonHideUnderline(
-                      child: DropdownButton<ModelConfig>(
-                        value: _selectedModel,
-                        isExpanded: true,
-                        icon: _isParsingPdf || !_isReady
-                            ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.grey))
-                            : const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.grey, size: 18),
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF1F1F1F), fontWeight: FontWeight.w600),
-                        onChanged: !_isBusy && !_isParsingPdf && _isReady ? (ModelConfig? newValue) {
-                          if (newValue != null) {
-                            setState(() { _selectedModel = newValue; });
-                            _initEngineAndLoadPdf();
-                          }
-                        } : null,
-                        items: availableModels.map<DropdownMenuItem<ModelConfig>>((ModelConfig model) {
-                          return DropdownMenuItem<ModelConfig>(
-                            value: model,
-                            child: Row(
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(3)),
-                                  child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: Colors.grey)),
-                                ),
-                                const SizedBox(width: 6),
-                                _buildCpuIndicator(model.cpuLoad),
-                                const SizedBox(width: 6),
-                                Expanded(child: Text(model.name, maxLines: 1, overflow: TextOverflow.ellipsis)),
-                              ],
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                ],
-              ),
-              actions: [
-                if (!_isTxtFile)
-                  TextButton.icon(
-                    style: TextButton.styleFrom(foregroundColor: const Color(0xFF1A73E8)),
-                    onPressed: () {
-                      setState(() => _showOriginalLayout = !_showOriginalLayout);
-                      _scrollToCurrentChunk(_currentChunkIndex);
-                      if (_showOriginalLayout) _updatePdfVisualHighlights(); else _clearPdfHighlights();
-                    },
-                    icon: Icon(_showOriginalLayout ? Icons.picture_as_pdf : Icons.text_fields_rounded, size: 20),
-                    label: Text(_showOriginalLayout ? 'Původní PDF' : 'Čistý text', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                  )
-                else
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 12.0),
-                    child: Center(child: Text('Čistý text', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1A73E8)))),
-                  ),
-                const VerticalDivider(width: 16, indent: 16, endIndent: 16),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Padding(
-                      padding: EdgeInsets.only(right: 2.0),
-                      child: Icon(Icons.search_rounded, size: 16, color: Color(0xFF1A73E8)),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.remove_circle_outline_rounded, size: 18),
-                      onPressed: () => _changeZoom(-_zoomStep),
-                    ),
-                    Container(
-                      constraints: const BoxConstraints(minWidth: 42),
-                      alignment: Alignment.center,
-                      child: Text(
-                        '${(_currentZoomFactor * 100).toStringAsFixed(0)}%',
-                        style: const TextStyle(fontSize: 12, fontFamily: 'monospace', fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
-                      onPressed: () => _changeZoom(_zoomStep),
-                    ),
-                  ],
                 ),
-                const SizedBox(width: 8),
-              ],
-            ),
-            body: SafeArea(
-              child: _needsModelSelection
-                  ? Center(
-                child: Container(
-                  constraints: const BoxConstraints(maxWidth: 400),
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), border: Border.all(color: Colors.grey.shade200)),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.voice_over_off_rounded, size: 48, color: Color(0xFF1A73E8)),
-                      const SizedBox(height: 16),
-                      const Text('Vyberte hlas pro tento dokument', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F1F1F))),
-                      const SizedBox(height: 8),
-                      const Text('Tento dokument nemá přiřazený model. Zvolte výchozí formát čtení:', textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: Colors.grey)),
-                      const SizedBox(height: 24),
-                      ...availableModels.map((model) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10.0),
-                        child: OutlinedButton(
-                          style: OutlinedButton.styleFrom(
-                            minimumSize: const Size.fromHeight(50),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            side: BorderSide(color: Colors.grey.shade300),
-                          ),
-                          onPressed: () => _selectInitialModel(model),
+                const SizedBox(width: 12),
+                Container(
+                  width: 190,
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(8)),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<ModelConfig>(
+                      value: _selectedModel,
+                      isExpanded: true,
+                      icon: _isParsingPdf || !_isReady
+                          ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.grey))
+                          : const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.grey, size: 18),
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF1F1F1F), fontWeight: FontWeight.w600),
+                      onChanged: !_isBusy && !_isParsingPdf && _isReady ? (ModelConfig? newValue) {
+                        if (newValue != null) {
+                          setState(() { _selectedModel = newValue; });
+                          _initEngineAndLoadPdf();
+                        }
+                      } : null,
+                      items: availableModels.map<DropdownMenuItem<ModelConfig>>((ModelConfig model) {
+                        return DropdownMenuItem<ModelConfig>(
+                          value: model,
                           child: Row(
                             children: [
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(4)),
-                                child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF1A73E8))),
+                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(3)),
+                                child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: Colors.grey)),
                               ),
-                              const SizedBox(width: 12),
-                              Expanded(child: Text(model.name, style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF1F1F1F)))),
+                              const SizedBox(width: 6),
                               _buildCpuIndicator(model.cpuLoad),
+                              const SizedBox(width: 6),
+                              Expanded(child: Text(model.name, maxLines: 1, overflow: TextOverflow.ellipsis)),
                             ],
                           ),
-                        ),
-                      )),
-                    ],
+                        );
+                      }).toList(),
+                    ),
                   ),
                 ),
-              )
-                  : Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    children: [
-                  Expanded(
-                  child: Stack(
-                  children: [
-                    Container(
-                    width: double.infinity,
-                    decoration: BoxDecoration(
-                      color: Colors.white, borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.grey.shade200),
-                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 12, offset: const Offset(0, 4))],
+                const SizedBox(width: 12),
+              ],
+            ),
+            actions: [
+              if (!_isTxtFile)
+                TextButton.icon(
+                  style: TextButton.styleFrom(foregroundColor: const Color(0xFF1A73E8)),
+                  onPressed: () {
+                    setState(() => _showOriginalLayout = !_showOriginalLayout);
+                    _scrollToCurrentChunk(_currentChunkIndex);
+                    if (_showOriginalLayout) _updatePdfVisualHighlights(); else _clearPdfHighlights();
+                  },
+                  icon: Icon(_showOriginalLayout ? Icons.picture_as_pdf : Icons.text_fields_rounded, size: 20),
+                  label: Text(_showOriginalLayout ? 'Původní PDF' : 'Čistý text', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                )
+              else
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12.0),
+                  child: Center(child: Text('Čistý text', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1A73E8)))),
+                ),
+              const VerticalDivider(width: 16, indent: 16, endIndent: 16),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(right: 2.0),
+                    child: Icon(Icons.search_rounded, size: 16, color: Color(0xFF1A73E8)),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.remove_circle_outline_rounded, size: 18),
+                    onPressed: (_currentZoomFactor <= _minZoom || _isMinZoomReached) ? null : () => _changeZoom(-_zoomStep),
+                  ),
+                  Container(
+                    constraints: const BoxConstraints(minWidth: 42),
+                    alignment: Alignment.center,
+                    child: Text(
+                      '${(_currentZoomFactor * 100).toStringAsFixed(0)}%',
+                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace', fontWeight: FontWeight.w700),
                     ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: _isParsingPdf
-                          ? const Center(child: DynamicPositionsParserIndicator())
-                          : IndexedStack(
-                        index: (_showOriginalLayout && !_isTxtFile) ? 1 : 0,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.all(8.0),
-                            child: ScrollablePositionedList.builder(
-                              itemScrollController: _itemScrollController,
-                              itemPositionsListener: _itemPositionsListener,
-                              itemCount: _chunksMetadata.length,
-                              itemBuilder: (context, index) {
-                                bool isCurrent = _isBusy && index == _currentChunkIndex;
-                                bool isSelected = index == _selectedChunkIndex;
-                                return InkWell(
-                                  onTap: () => setState(() { _selectedChunkIndex = index; }),
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: AnimatedContainer(
-                                    duration: const Duration(milliseconds: 150),
-                                    margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-                                    padding: const EdgeInsets.all(12),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
+                    onPressed: (_currentZoomFactor >= _maxZoom || _isMaxZoomReached) ? null : () => _changeZoom(_zoomStep),
+                  ),
+                ],
+              ),
+              IconButton(
+                icon: Icon(_isFullscreen ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded),
+                onPressed: () => setState(() => _isFullscreen = !_isFullscreen),
+              ),
+              const SizedBox(width: 8),
+            ],
+          ),
+          body: SafeArea(
+            child: _needsModelSelection
+                ? Center(
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 400),
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), border: Border.all(color: Colors.grey.shade200)),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.voice_over_off_rounded, size: 48, color: Color(0xFF1A73E8)),
+                    const SizedBox(height: 16),
+                    const Text('Vyberte hlas pro tento dokument', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F1F1F))),
+                    const SizedBox(height: 8),
+                    const Text('Tento dokument nemá přiřazený model. Zvolte výchozí formát čtení:', textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: Colors.grey)),
+                    const SizedBox(height: 24),
+                    ...availableModels.map((model) => Padding(
+                      padding: const EdgeInsets.only(bottom: 10.0),
+                      child: OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(50),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          side: BorderSide(color: Colors.grey.shade300),
+                        ),
+                        onPressed: () => _selectInitialModel(model),
+                        child: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(4)),
+                              child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF1A73E8))),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(child: Text(model.name, style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF1F1F1F)))),
+                            _buildCpuIndicator(model.cpuLoad),
+                          ],
+                        ),
+                      ),
+                    )),
+                  ],
+                ),
+              ),
+            )
+                : Padding(
+              padding: _isFullscreen ? EdgeInsets.zero : const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          decoration: BoxDecoration(
+                            color: Colors.white, borderRadius: _isFullscreen ? BorderRadius.zero : BorderRadius.circular(16),
+                            border: _isFullscreen ? null : Border.all(color: Colors.grey.shade200),
+                            boxShadow: _isFullscreen ? [] : [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 12, offset: const Offset(0, 4))],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: _isFullscreen ? BorderRadius.zero : BorderRadius.circular(16),
+                            child: _isParsingPdf
+                                ? Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const CircularProgressIndicator(strokeWidth: 3),
+                                  const SizedBox(height: 24),
+                                  Text(
+                                    'Načítám text a strukturu dokumentu... (${(_parsingProgress * 100).toStringAsFixed(0)}%)',
+                                    style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: 13),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Container(
+                                    width: 240,
+                                    height: 4,
                                     decoration: BoxDecoration(
-                                      color: isCurrent
-                                          ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3)
-                                          : (isSelected ? Colors.orange.shade50 : Colors.transparent),
-                                      borderRadius: BorderRadius.circular(8),
-                                      border: isSelected ? Border.all(color: Colors.orange.shade400, width: 1.5) : null,
+                                      color: Colors.grey.shade200,
+                                      borderRadius: BorderRadius.circular(2),
                                     ),
-                                    child: isCurrent
-                                        ? RichText(
-                                      text: TextSpan(
-                                        style: TextStyle(fontSize: 17 * _currentZoomFactor, height: 1.6, color: Colors.black87),
-                                        children: _buildHighlightedWords(_chunksMetadata[index].text, context),
-                                      ),
-                                    )
-                                        : Text(
-                                      _chunksMetadata[index].text,
-                                      style: TextStyle(
-                                        fontSize: 16 * _currentZoomFactor, height: 1.6,
-                                        color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 100),
+                                        width: 240 * _parsingProgress,
+                                        height: 4,
+                                        decoration: BoxDecoration(
+                                          color: Theme.of(context).colorScheme.primary,
+                                          borderRadius: BorderRadius.circular(2),
+                                        ),
                                       ),
                                     ),
                                   ),
-                                );
-                              },
-                            ),
-                          ),
-                          if (!_isTxtFile)
-                            Listener(
-                              onPointerSignal: _handlePointerSignal,
-                              child: LayoutBuilder(
-                                builder: (context, constraints) {
-                                  _pdfViewerSize = Size(constraints.maxWidth, constraints.maxHeight);
-                                  return GestureDetector(
-                                    onTapUp: _handlePdfTap,
-                                    child: Stack(
-                                      children: [
-                                        SfPdfViewer.file(
-                                          File(widget.book.filePath),
-                                          controller: _pdfViewerController,
-                                          pageLayoutMode: PdfPageLayoutMode.single,
-                                          canShowScrollHead: false, canShowTextSelectionMenu: false,
-                                          enableDoubleTapZooming: true, enableDocumentLinkAnnotation: true,
-                                          onDocumentLoaded: (details) {
-                                            _pdfViewerController.zoomLevel = _currentZoomFactor;
-                                          },
-                                        ),
-                                        IgnorePointer(
-                                          child: ValueListenableBuilder<HighlightData>(
-                                            valueListenable: _highlightNotifier,
-                                            builder: (context, data, _) => CustomPaint(
-                                              size: Size.infinite,
-                                              painter: PdfHighlightPainter(
-                                                sentenceRects: data.sentenceRects, wordRect: data.wordRect,
-                                                primaryColor: Theme.of(context).colorScheme.primary,
-                                              ),
+                                ],
+                              ),
+                            )
+                                : IndexedStack(
+                              index: (_showOriginalLayout && !_isTxtFile) ? 1 : 0,
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.all(8.0),
+                                  child: ScrollablePositionedList.builder(
+                                    itemScrollController: _itemScrollController,
+                                    itemPositionsListener: _itemPositionsListener,
+                                    itemCount: _chunksMetadata.length,
+                                    itemBuilder: (context, index) {
+                                      bool isCurrent = _isBusy && index == _currentChunkIndex;
+                                      bool isSelected = index == _selectedChunkIndex;
+                                      return InkWell(
+                                        onTap: () => setState(() { _selectedChunkIndex = index; }),
+                                        borderRadius: BorderRadius.circular(8),
+                                        child: AnimatedContainer(
+                                          duration: const Duration(milliseconds: 150),
+                                          margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: BoxDecoration(
+                                            color: isCurrent
+                                                ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3)
+                                                : (isSelected ? Colors.orange.shade50 : Colors.transparent),
+                                            borderRadius: BorderRadius.circular(8),
+                                            border: isSelected ? Border.all(color: Colors.orange.shade400, width: 1.5) : null,
+                                          ),
+                                          child: isCurrent
+                                              ? RichText(
+                                            text: TextSpan(
+                                              style: TextStyle(fontSize: 17 * _textZoomFactor, height: 1.6, color: Colors.black87),
+                                              children: _buildHighlightedWords(_chunksMetadata[index].text, context),
+                                            ),
+                                          )
+                                              : Text(
+                                            _chunksMetadata[index].text,
+                                            style: TextStyle(
+                                              fontSize: 16 * _textZoomFactor, height: 1.6,
+                                              color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
                                             ),
                                           ),
                                         ),
-                                      ],
+                                      );
+                                    },
+                                  ),
+                                ),
+                                if (!_isTxtFile)
+                                  NotificationListener<ScrollNotification>(
+                                    onNotification: (notification) {
+                                      if (notification is ScrollUpdateNotification && !_isProgrammaticScrolling) {
+                                        if (!_isUserScrolling) {
+                                          setState(() { _isUserScrolling = true; });
+                                        }
+                                      }
+                                      return false;
+                                    },
+                                    child: LayoutBuilder(
+                                      builder: (context, constraints) {
+                                        _pdfViewerSize = Size(constraints.maxWidth, constraints.maxHeight);
+                                        return GestureDetector(
+                                          onTapUp: _handlePdfTap,
+                                          child: Stack(
+                                            children: [
+                                              SfPdfViewer.file(
+                                                File(widget.book.filePath),
+                                                controller: _pdfViewerController,
+                                                pageLayoutMode: PdfPageLayoutMode.continuous,
+                                                canShowScrollHead: false, canShowTextSelectionMenu: false,
+                                                enableDoubleTapZooming: true, enableDocumentLinkAnnotation: true,
+                                                onDocumentLoaded: (details) {
+                                                  _pdfViewerController.zoomLevel = _pdfZoomFactor * 2.0;
+                                                },
+                                                onPageChanged: (details) {
+                                                  setState(() {
+                                                    _currentPdfPage = details.newPageNumber;
+                                                  });
+                                                },
+                                                onZoomLevelChanged: (details) {
+                                                  setState(() {
+                                                    _isMaxZoomReached = details.newZoomLevel >= (_maxZoom * 2.0);
+                                                    _isMinZoomReached = details.newZoomLevel <= (_minZoom * 2.0);
+                                                    _pdfZoomFactor = details.newZoomLevel / 2.0;
+                                                  });
+                                                  _updatePdfVisualHighlights();
+                                                },
+                                              ),
+                                              IgnorePointer(
+                                                child: ValueListenableBuilder<HighlightData>(
+                                                  valueListenable: _highlightNotifier,
+                                                  builder: (context, data, _) => CustomPaint(
+                                                    size: Size.infinite,
+                                                    painter: PdfHighlightPainter(
+                                                      sentenceRects: data.sentenceRects, wordRect: data.wordRect,
+                                                      primaryColor: Theme.of(context).colorScheme.primary,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      },
                                     ),
-                                  );
-                                },
+                                  )
+                                else
+                                  const SizedBox.shrink(),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (_isUserScrolling && !_isFullscreen)
+                          Positioned(
+                            bottom: 16, right: 16,
+                            child: FloatingActionButton.small(
+                              onPressed: _recenterToCurrentChunk,
+                              backgroundColor: const Color(0xFF1A73E8),
+                              foregroundColor: Colors.white,
+                              child: const Icon(Icons.center_focus_strong_rounded),
+                            ),
+                          ),
+                        if (_isFullscreen)
+                          Positioned(
+                            top: 16, right: 16,
+                            child: Container(
+                              decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), shape: BoxShape.circle),
+                              child: IconButton(
+                                icon: const Icon(Icons.fullscreen_exit_rounded, color: Colors.black87),
+                                onPressed: () => setState(() => _isFullscreen = false),
                               ),
-                            )
-                          else
-                            const SizedBox.shrink(),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  if (!_isParsingPdf && !_isFullscreen) ...[
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.grid_view_rounded, size: 14, color: Colors.grey),
+                              const SizedBox(width: 6),
+                              Text(
+                                  (_showOriginalLayout && !_isTxtFile)
+                                      ? 'Stránka: $_currentPdfPage / $_totalPdfPages'
+                                      : 'Blok: ${_currentChunkIndex + 1} / ${_chunksMetadata.length}',
+                                  style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368), fontWeight: FontWeight.w600)
+                              ),
+                            ],
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            decoration: BoxDecoration(color: const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(6)),
+                            child: DropdownButtonHideUnderline(
+                              child: DropdownButton<double>(
+                                value: _playbackSpeed,
+                                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F)),
+                                onChanged: (val) {
+                                  if (val != null) _changeSpeed(val);
+                                },
+                                items: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0].map((s) => DropdownMenuItem(value: s, child: Text('${s}x'))).toList(),
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ),
-                  ),
-                  if (_isUserScrolling)
-              Positioned(
-              bottom: 16, right: 16,
-              child: FloatingActionButton.small(
-                onPressed: _recenterToCurrentChunk,
-                backgroundColor: const Color(0xFF1A73E8),
-                foregroundColor: Colors.white,
-                child: const Icon(Icons.center_focus_strong_rounded),
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(value: progress, backgroundColor: Colors.grey.shade200, color: Theme.of(context).colorScheme.primary, minHeight: 6),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.replay_10_rounded, size: 28),
+                          onPressed: _isBusy ? () => _seekRelative(-10) : null,
+                        ),
+                        const SizedBox(width: 16),
+                        SizedBox(
+                          width: 64, height: 64,
+                          child: Center(
+                            child: Material(
+                              type: MaterialType.transparency,
+                              child: InkWell(
+                                customBorder: const CircleBorder(),
+                                onTap: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
+                                child: showJumpButton
+                                    ? IconButton(
+                                  padding: EdgeInsets.zero,
+                                  icon: Icon(Icons.play_circle_filled_rounded, color: Colors.orange.shade700, size: 54),
+                                  onPressed: _jumpToSelectedAndPlay,
+                                )
+                                    : IconButton(
+                                  padding: EdgeInsets.zero,
+                                  icon: Icon(
+                                    _isBusy ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded,
+                                    color: _isBusy ? Colors.red.shade600 : const Color(0xFF1A73E8),
+                                    size: 54,
+                                  ),
+                                  onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        IconButton(
+                          icon: const Icon(Icons.forward_10_rounded, size: 28),
+                          onPressed: _isBusy ? () => _seekRelative(10) : null,
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
               ),
             ),
-            ],
           ),
         ),
-        if (!_isParsingPdf) ...[
-    const SizedBox(height: 16),
-    Container(
-    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
-    child: Row(
-    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-    children: [
-    Row(
-    children: [
-    const Icon(Icons.grid_view_rounded, size: 14, color: Colors.grey),
-    const SizedBox(width: 6),
-    Text('Blok: ${_currentChunkIndex + 1} / ${_chunksMetadata.length}', style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368), fontWeight: FontWeight.w600)),
-    ],
-    ),
-    ],
-    ),
-    ),
-    const SizedBox(height: 12),
-    ClipRRect(
-    borderRadius: BorderRadius.circular(4),
-    child: LinearProgressIndicator(value: progress, backgroundColor: Colors.grey.shade200, color: Theme.of(context).colorScheme.primary, minHeight: 6),
-    ),
-    const SizedBox(height: 16),
-    Row(
-    children: [
-    Expanded(
-    child: SizedBox(
-    height: 54,
-    child: showJumpButton
-    ? FilledButton.icon(
-    onPressed: _jumpToSelectedAndPlay,
-    style: FilledButton.styleFrom(backgroundColor: Colors.orange.shade700, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-    icon: const Icon(Icons.play_circle_filled_rounded), label: const Text('SPUSTIT OD VYBRANÉHO MÍSTA', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.2)),
-    )
-        : FilledButton.icon(
-    onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
-    style: FilledButton.styleFrom(backgroundColor: _isBusy ? Colors.red.shade600 : const Color(0xFF1A73E8), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-    icon: Icon(_isBusy ? Icons.stop_rounded : Icons.play_arrow_rounded, size: 22),
-    label: Text(_isBusy ? 'ZASTAVIT ČTENÍ' : 'SPUSTIT PŘEHRÁVÁNÍ', style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.2)),
-    ),
-    ),
-    ),
-    ],
-    ),
-    ],
-    ]),
-    ),
-    ),
-    )));
-    }
+      ),
+    );
+  }
 
   List<TextSpan> _buildHighlightedWords(String text, BuildContext context) {
     List<String> words = text.split(' ');
