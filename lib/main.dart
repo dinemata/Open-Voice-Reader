@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 import 'package:file_picker/file_picker.dart';
@@ -15,6 +16,7 @@ import 'package:audio_service/audio_service.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:pdfx/pdfx.dart' as pdfx;
+import 'package:url_launcher/url_launcher.dart';
 
 late MyAudioHandler _audioHandler;
 late AudioPlayer _windowsPlayer;
@@ -107,6 +109,7 @@ class BookModel {
   final int totalChunks;
   final int totalWords;
   String? coverPath;
+  String? lastModelId;
 
   BookModel({
     required this.id,
@@ -116,6 +119,7 @@ class BookModel {
     required this.totalChunks,
     required this.totalWords,
     this.coverPath,
+    this.lastModelId,
   });
 
   Map<String, dynamic> toMap() => {
@@ -126,6 +130,7 @@ class BookModel {
     'totalChunks': totalChunks,
     'totalWords': totalWords,
     'coverPath': coverPath,
+    'lastModelId': lastModelId,
   };
 
   factory BookModel.fromMap(Map<String, dynamic> map) => BookModel(
@@ -136,6 +141,7 @@ class BookModel {
     totalChunks: map['totalChunks'],
     totalWords: map['totalWords'],
     coverPath: map['coverPath'],
+    lastModelId: map['lastModelId'],
   );
 }
 
@@ -258,6 +264,7 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   List<BookModel> _books = [];
   bool _isLoadingHistory = true;
+  bool _isImporting = false;
 
   @override
   void initState() {
@@ -289,8 +296,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final document = await pdfx.PdfDocument.openFile(pdfPath);
       final page = await document.getPage(1);
       final pageImage = await page.render(
-        width: page.width * 1.5,
-        height: page.height * 1.5,
+        width: page.width * 2,
+        height: page.height * 2,
         format: pdfx.PdfPageImageFormat.png,
       );
       await page.close();
@@ -301,12 +308,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final coverFolder = Directory(p.join(appDir.path, 'covers'));
         if (!coverFolder.existsSync()) await coverFolder.create(recursive: true);
 
-        final coverFile = File(p.join(coverFolder.path, '${bookId}.png'));
-        await coverFile.writeAsBytes(pageImage.bytes);
+        final coverFile = File(p.join(coverFolder.path, '$bookId.png'));
+        await coverFile.writeAsBytes(pageImage.bytes, flush: true);
         return coverFile.path;
       }
     } catch (e) {
-      debugPrint('Chyba při generování náhledu PDF: $e');
+      debugPrint('[COVER_ERROR] Selhalo generování: $e');
     }
     return null;
   }
@@ -315,6 +322,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['pdf']);
       if (result == null || result.files.single.path == null) return;
+
+      setState(() => _isImporting = true);
 
       final filePath = result.files.single.path!;
       final file = File(filePath);
@@ -344,12 +353,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
         totalChunks: chunkCount > 0 ? chunkCount : 1,
         totalWords: wordCount,
         coverPath: coverPath,
+        lastModelId: null,
       );
 
-      setState(() { _books.insert(0, newBook); });
+      setState(() {
+        _books.insert(0, newBook);
+        _isImporting = false;
+      });
       await _saveHistory();
       _openBook(newBook);
     } catch (e) {
+      setState(() => _isImporting = false);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Chyba importu: $e')));
     }
   }
@@ -417,16 +431,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  void _showLocationDialog(BookModel book) {
+  Future<void> _openFileLocation(BookModel book) async {
+    final file = File(book.filePath);
+    if (!file.existsSync()) {
+      _showRelinkDialog(book);
+      return;
+    }
+
+    if (Platform.isWindows) {
+      await Process.run('explorer.exe', ['/select,', book.filePath]);
+    } else if (Platform.isAndroid) {
+      final folderPath = p.dirname(book.filePath);
+      final Uri uri = Uri.parse("content://com.android.externalstorage.documents/document/primary:${p.relative(folderPath, from: '/storage/emulated/0')}");
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri);
+      } else {
+        final Uri backupUri = Uri.parse("file://$folderPath");
+        if (await canLaunchUrl(backupUri)) {
+          await launchUrl(backupUri);
+        } else {
+          _showLocationFallback(book.filePath);
+        }
+      }
+    } else {
+      _showLocationFallback(book.filePath);
+    }
+  }
+
+  void _showLocationFallback(String path) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Umístění souboru'),
-        content: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8)),
-          child: SelectableText(book.filePath, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
-        ),
+        title: const Text('Cesta k souboru'),
+        content: SelectableText(path),
         actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Zavřít'))],
       ),
     );
@@ -444,190 +481,200 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FA),
-      appBar: AppBar(
-        title: const Text('free_voice_reader', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: -0.5, color: Color(0xFF1F1F1F))),
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        shape: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1)),
-      ),
-      body: CustomScrollView(
-        slivers: [
-          SliverToBoxAdapter(
+        backgroundColor: const Color(0xFFF8F9FA),
+        appBar: AppBar(
+          title: const Text('free_voice_reader', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: -0.5, color: Color(0xFF1F1F1F))),
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          shape: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1)),
+        ),
+        body: IgnorePointer(
+          ignoring: _isImporting,
+          child: Opacity(
+            opacity: _isImporting ? 0.5 : 1.0,
+            child: CustomScrollView(
+                slivers: [
+            SliverToBoxAdapter(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Material(
-                    color: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Material(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  child: InkWell(
+                    onTap: _isImporting ? null : _importNewBook,
                     borderRadius: BorderRadius.circular(16),
-                    child: InkWell(
-                      onTap: _importNewBook,
-                      borderRadius: BorderRadius.circular(16),
-                      child: Container(
-                        width: double.infinity, height: 110,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.blue.shade200, width: 1.5),
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(color: Colors.blue.shade50, shape: BoxShape.circle),
-                              child: const Icon(Icons.add_rounded, size: 28, color: Color(0xFF1A73E8)),
-                            ),
-                            const SizedBox(height: 10),
-                            const Text('Otevřít nový PDF dokument', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1A73E8))),
-                          ],
-                        ),
+                    child: Container(
+                      width: double.infinity, height: 110,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.blue.shade200, width: 1.5),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(color: Colors.blue.shade50, shape: BoxShape.circle),
+                            child: _isImporting
+                                ? const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 2.5))
+                                : const Icon(Icons.add_rounded, size: 28, color: Color(0xFF1A73E8)),
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            _isImporting ? 'Načítání a analýza PDF souboru...' : 'Otevřít nový PDF dokument',
+                            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1A73E8)),
+                          ),
+                        ],
                       ),
                     ),
                   ),
-                  const SizedBox(height: 36),
-                  const Text('Nedávné dokumenty', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: Color(0xFF1F1F1F))),
-                  const SizedBox(height: 16),
-                ],
-              ),
+                ),
+                const SizedBox(height: 36),
+                const Text('Nedávné dokumenty', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: Color(0xFF1F1F1F))),
+                const SizedBox(height: 16),
+              ],
             ),
           ),
-          if (_isLoadingHistory)
-            const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))
-          else if (_books.isEmpty)
-            const SliverFillRemaining(child: Center(child: Text('Žádné dokumenty k zobrazení.', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w500))))
-          else
-            SliverPadding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              sliver: SliverGrid(
-                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                  maxCrossAxisExtent: 280, mainAxisSpacing: 20, crossAxisSpacing: 20, childAspectRatio: 0.85,
-                ),
-                delegate: SliverChildBuilderDelegate(
-                      (context, index) {
-                    final book = _books[index];
-                    final double progress = book.totalChunks > 0 ? book.lastChunkIndex / book.totalChunks : 0.0;
-                    final bool hasCover = book.coverPath != null && File(book.coverPath!).existsSync();
+        ),
+        if (_isLoadingHistory)
+    const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))
+    else if (_books.isEmpty)
+    const SliverFillRemaining(child: Center(child: Text('Žádné dokumenty k zobrazení.', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w500))))
+    else
+    SliverPadding(
+    padding: const EdgeInsets.symmetric(horizontal: 24),
+    sliver: SliverGrid(
+    gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+    maxCrossAxisExtent: 280, mainAxisSpacing: 20, crossAxisSpacing: 20, childAspectRatio: 0.85,
+    ),
+    delegate: SliverChildBuilderDelegate(
+    (context, index) {
+    final book = _books[index];
+    final double progress = book.totalChunks > 0 ? book.lastChunkIndex / book.totalChunks : 0.0;
+    final bool hasCover = book.coverPath != null && File(book.coverPath!).existsSync();
 
-                    return FutureBuilder<bool>(
-                      future: File(book.filePath).exists(),
-                      builder: (context, snapshot) {
-                        final bool exists = snapshot.data ?? true;
-                        return Container(
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
-                            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 2))],
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(16),
-                            child: InkWell(
-                              onTap: () => _openBook(book),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    child: Stack(
-                                      children: [
-                                        Positioned.fill(
-                                          child: hasCover
-                                              ? Image.file(File(book.coverPath!), fit: BoxFit.cover, alignment: Alignment.topCenter)
-                                              : Container(
-                                            color: Colors.grey.shade100,
-                                            child: Icon(Icons.picture_as_pdf_rounded, color: exists ? Colors.red.shade300 : Colors.grey.shade400, size: 48),
-                                          ),
-                                        ),
-                                        Positioned(
-                                          top: 8, left: 8,
-                                          child: Container(
-                                            padding: const EdgeInsets.all(6),
-                                            decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(8)),
-                                            child: Icon(Icons.picture_as_pdf_rounded, color: exists ? Colors.red.shade600 : Colors.grey, size: 16),
-                                          ),
-                                        ),
-                                        if (!exists)
-                                          Positioned(
-                                            top: 8, left: 40,
-                                            child: Container(
-                                              padding: const EdgeInsets.all(4),
-                                              decoration: BoxDecoration(color: Colors.amber.shade50, shape: BoxShape.circle),
-                                              child: Icon(Icons.warning_amber_rounded, color: Colors.amber.shade900, size: 16),
-                                            ),
-                                          ),
-                                        Positioned(
-                                          top: 8, right: 8,
-                                          child: Container(
-                                            decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), shape: BoxShape.circle),
-                                            child: PopupMenuButton<String>(
-                                              padding: EdgeInsets.zero,
-                                              constraints: const BoxConstraints(),
-                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                              icon: const Icon(Icons.more_vert_rounded, size: 18, color: Color(0xFF5F6368)),
-                                              onSelected: (value) {
-                                                if (value == 'open') _openBook(book);
-                                                if (value == 'rename') _showRenameDialog(book);
-                                                if (value == 'location') _showLocationDialog(book);
-                                                if (value == 'relink') _showRelinkDialog(book);
-                                                if (value == 'delete') _deleteBook(book);
-                                              },
-                                              itemBuilder: (context) => [
-                                                const PopupMenuItem(value: 'open', child: Row(children: [Icon(Icons.book_outlined, size: 18), SizedBox(width: 10), Text('Otevřít')])),
-                                                const PopupMenuItem(value: 'rename', child: Row(children: [Icon(Icons.edit_outlined, size: 18), SizedBox(width: 10), Text('Přejmenovat')])),
-                                                const PopupMenuItem(value: 'location', child: Row(children: [Icon(Icons.folder_open_outlined, size: 18), SizedBox(width: 10), Text('Zobrazit umístění')])),
-                                                if (!exists) const PopupMenuItem(value: 'relink', child: Row(children: [Icon(Icons.link_outlined, size: 18), SizedBox(width: 10), Text('Dohledat')])),
-                                                PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline_rounded, size: 18, color: Colors.red.shade600), SizedBox(width: 10), Text('Smazat', style: TextStyle(color: Colors.red.shade600, fontWeight: FontWeight.w600))])),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Container(
-                                    color: Colors.white,
-                                    padding: const EdgeInsets.all(12.0),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: exists ? const Color(0xFF1F1F1F) : Colors.grey.shade600)),
-                                        const SizedBox(height: 8),
-                                        Row(
-                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                          children: [
-                                            Expanded(
-                                              child: ClipRRect(
-                                                borderRadius: BorderRadius.circular(4),
-                                                child: LinearProgressIndicator(
-                                                  value: progress.clamp(0.0, 1.0),
-                                                  backgroundColor: Colors.grey.shade100, color: const Color(0xFF1A73E8),
-                                                  minHeight: 5,
-                                                ),
-                                              ),
-                                            ),
-                                            const SizedBox(width: 10),
-                                            Text('${(progress * 100).toStringAsFixed(0)}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Color(0xFF757575))),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    );
-                  },
-                  childCount: _books.length,
-                ),
-              ),
-            ),
-        ],
-      ),
+    return FutureBuilder<bool>(
+    future: File(book.filePath).exists(),
+    builder: (context, snapshot) {
+    final bool exists = snapshot.data ?? true;
+    return Container(
+    decoration: BoxDecoration(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(16),
+    border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
+    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 2))],
+    ),
+    child: ClipRRect(
+    borderRadius: BorderRadius.circular(16),
+    child: InkWell(
+    onTap: () => _openBook(book),
+    child: Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+    Expanded(
+    child: Stack(
+    children: [
+    Positioned.fill(
+    child: hasCover
+    ? Image.file(File(book.coverPath!), fit: BoxFit.cover, alignment: Alignment.topCenter)
+        : Container(
+    color: Colors.grey.shade100,
+    child: Icon(Icons.picture_as_pdf_rounded, color: exists ? Colors.red.shade300 : Colors.grey.shade400, size: 48),
+    ),
+    ),
+    Positioned(
+    top: 8, left: 8,
+    child: Container(
+    padding: const EdgeInsets.all(6),
+    decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(8)),
+    child: Icon(Icons.picture_as_pdf_rounded, color: exists ? Colors.red.shade600 : Colors.grey, size: 16),
+    ),
+    ),
+    if (!exists)
+    Positioned(
+    top: 8, left: 40,
+    child: Container(
+    padding: const EdgeInsets.all(4),
+    decoration: BoxDecoration(color: Colors.amber.shade50, shape: BoxShape.circle),
+    child: Icon(Icons.warning_amber_rounded, color: Colors.amber.shade900, size: 16),
+    ),
+    ),
+    Positioned(
+    top: 8, right: 8,
+    child: Container(
+    decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), shape: BoxShape.circle),
+    child: PopupMenuButton<String>(
+    padding: EdgeInsets.zero,
+    constraints: const BoxConstraints(),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    icon: const Icon(Icons.more_vert_rounded, size: 18, color: Color(0xFF5F6368)),
+    onSelected: (value) {
+    if (value == 'open') _openBook(book);
+    if (value == 'rename') _showRenameDialog(book);
+    if (value == 'location') _openFileLocation(book);
+    if (value == 'relink') _showRelinkDialog(book);
+    if (value == 'delete') _deleteBook(book);
+    },
+    itemBuilder: (context) => [
+    const PopupMenuItem(value: 'open', child: Row(children: [Icon(Icons.book_outlined, size: 18), SizedBox(width: 10), Text('Otevřít')])),
+    const PopupMenuItem(value: 'rename', child: Row(children: [Icon(Icons.edit_outlined, size: 18), SizedBox(width: 10), Text('Přejmenovat')])),
+    const PopupMenuItem(value: 'location', child: Row(children: [Icon(Icons.folder_open_outlined, size: 18), SizedBox(width: 10), Text('Zobrazit umístění')])),
+    if (!exists) const PopupMenuItem(value: 'relink', child: Row(children: [Icon(Icons.link_outlined, size: 18), SizedBox(width: 10), Text('Dohledat')])),
+    PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline_rounded, size: 18, color: Colors.red.shade600), SizedBox(width: 10), Text('Smazat', style: TextStyle(color: Colors.red.shade600, fontWeight: FontWeight.w600))])),
+    ],
+    ),
+    ),
+    ),
+    ],
+    ),
+    ),
+    Container(
+    color: Colors.white,
+    padding: const EdgeInsets.all(12.0),
+    child: Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+    Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: exists ? const Color(0xFF1F1F1F) : Colors.grey.shade600)),
+    const SizedBox(height: 8),
+    Row(
+    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    children: [
+    Expanded(
+    child: ClipRRect(
+    borderRadius: BorderRadius.circular(4),
+    child: LinearProgressIndicator(
+    value: progress.clamp(0.0, 1.0),
+    backgroundColor: Colors.grey.shade100, color: const Color(0xFF1A73E8),
+    minHeight: 5,
+    ),
+    ),
+    ),
+    const SizedBox(width: 10),
+    Text('${(progress * 100).toStringAsFixed(0)}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Color(0xFF757575))),
+    ],
+    ),
+    ],
+    ),
+    ),
+    ],
+    ),
+    ),
+    ),
+    );
+    },
+    );
+    },
+    childCount: _books.length,
+    ),
+    ),
+    )],
+    ),
+    ),
+    ),
     );
   }
 }
@@ -645,6 +692,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final ItemPositionsListener _itemPositionsListener = ItemPositionsListener.create();
   final PdfViewerController _pdfViewerController = PdfViewerController();
   final ValueNotifier<HighlightData> _highlightNotifier = ValueNotifier<HighlightData>(HighlightData(sentenceRects: []));
+  final FocusNode _keyboardFocusNode = FocusNode();
 
   sf.PdfDocument? _loadedDocument;
   Size _pdfViewerSize = Size.zero;
@@ -652,7 +700,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   bool _isBusy = false;
   bool _isParsingPdf = false;
   bool _isBufferingNext = false;
-  bool _allowZoom = false;
+  bool _needsModelSelection = true;
   ModelConfig _selectedModel = availableModels.first;
   final List<PdfChunkMetadata> _chunksMetadata = [];
   int _currentChunkIndex = 0;
@@ -665,11 +713,22 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final Map<int, String> _pregeneratedAudioCache = {};
   final String _cleanupMode = 'chytreParsovani';
 
+  double _currentZoomFactor = 1.0;
+  final double _zoomStep = 0.1;
+  final double _minZoom = 0.4;
+  final double _maxZoom = 4.0;
+
   @override
   void initState() {
     super.initState();
     _currentChunkIndex = widget.book.lastChunkIndex;
-    _initEngineAndLoadPdf();
+
+    if (widget.book.lastModelId != null) {
+      _needsModelSelection = false;
+      final found = availableModels.firstWhere((m) => m.id == widget.book.lastModelId, orElse: () => availableModels.first);
+      _selectedModel = found;
+      _initEngineAndLoadPdf();
+    }
 
     _itemPositionsListener.itemPositions.addListener(() {
       if (_chunksMetadata.isEmpty || _isParsingPdf || _isProgrammaticScrolling || _showOriginalLayout) return;
@@ -692,16 +751,50 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
   }
 
+  Future<void> _selectInitialModel(ModelConfig model) async {
+    setState(() {
+      _selectedModel = model;
+      _needsModelSelection = false;
+    });
+    widget.book.lastModelId = model.id;
+    final prefs = await SharedPreferences.getInstance();
+    final String? booksJson = prefs.getString('saved_books');
+    if (booksJson != null) {
+      final List<dynamic> decoded = jsonDecode(booksJson);
+      final List<BookModel> list = decoded.map((item) => BookModel.fromMap(item)).toList();
+      final idx = list.indexWhere((b) => b.id == widget.book.id);
+      if (idx != -1) {
+        list[idx].lastModelId = model.id;
+        await prefs.setString('saved_books', jsonEncode(list.map((b) => b.toMap()).toList()));
+      }
+    }
+    _initEngineAndLoadPdf();
+  }
+
   Future<void> _initEngineAndLoadPdf() async {
-    setState(() { _isParsingPdf = true; });
+    setState(() {
+      _isParsingPdf = true;
+      _isReady = false;
+    });
+
     await _initEngine();
 
     try {
-      final bytes = await File(widget.book.filePath).readAsBytes();
+      final file = File(widget.book.filePath);
+      if (!await file.exists()) throw Exception("Soubor neexistuje.");
+
+      final bytes = await file.readAsBytes();
       _loadedDocument = sf.PdfDocument(inputBytes: bytes);
-      _parseAndStructurePdf(_loadedDocument!);
+
+      final parsedChunks = await compute(_parsePdfInBackground, {
+        'bytes': bytes,
+        'cleanupMode': _cleanupMode,
+      });
 
       setState(() {
+        _chunksMetadata.clear();
+        _pregeneratedAudioCache.clear();
+        _chunksMetadata.addAll(parsedChunks);
         if (_chunksMetadata.isEmpty) {
           _chunksMetadata.add(PdfChunkMetadata(text: "PDF neobsahuje text.", pageNumber: 1, pdfWords: []));
         }
@@ -712,9 +805,72 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _scrollToCurrentChunk(_currentChunkIndex);
       });
     } catch (e) {
-      debugPrint('Error loading PDF: $e');
       setState(() { _isParsingPdf = false; });
     }
+  }
+
+  static List<PdfChunkMetadata> _parsePdfInBackground(Map<String, dynamic> args) {
+    final Uint8List bytes = args['bytes'];
+    final String cleanupMode = args['cleanupMode'];
+    final List<PdfChunkMetadata> localChunks = [];
+
+    final sf.PdfDocument document = sf.PdfDocument(inputBytes: bytes);
+    final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
+
+    for (int pageIdx = 0; pageIdx < document.pages.count; pageIdx++) {
+      final List<sf.TextLine> textLines = extractor.extractTextLines(startPageIndex: pageIdx, endPageIndex: pageIdx);
+      List<PdfWordGeometry> sentenceWordsCollector = [];
+      StringBuffer sentenceTextCollector = StringBuffer();
+      StringBuffer reconstructedWordText = StringBuffer();
+      Rect? reconstructedWordBounds;
+
+      for (final sf.TextLine line in textLines) {
+        if (line.wordCollection.isEmpty) continue;
+        for (final sf.TextWord word in line.wordCollection) {
+          String part = word.text;
+          if (reconstructedWordText.isEmpty) {
+            reconstructedWordBounds = word.bounds;
+          } else if (reconstructedWordBounds != null) {
+            reconstructedWordBounds = reconstructedWordBounds.expandToInclude(word.bounds);
+          }
+          reconstructedWordText.write(part);
+          if (part.endsWith(' ') || part == '\n' || part == '\r' || word == line.wordCollection.last) {
+            String cleanWord = reconstructedWordText.toString().trim();
+            reconstructedWordText.clear();
+            if (cleanWord.isEmpty) continue;
+            if (cleanupMode == 'chytreParsovani') {
+              if (cleanWord.contains(RegExp(r'https?://\S+|www\.\S+'))) continue;
+              if (RegExp(r'^\d+$').hasMatch(cleanWord) || RegExp(r'^\[\d+\]$').hasMatch(cleanWord)) continue;
+            }
+            if (sentenceTextCollector.isEmpty) {
+              sentenceTextCollector.write(cleanWord);
+            } else {
+              sentenceTextCollector.write(" $cleanWord");
+            }
+            if (reconstructedWordBounds != null) {
+              sentenceWordsCollector.add(PdfWordGeometry(bounds: reconstructedWordBounds, text: cleanWord));
+            }
+            bool isEndOfSentence = cleanWord.endsWith('.') || cleanWord.endsWith('?') || cleanWord.endsWith('!');
+            if (isEndOfSentence || sentenceTextCollector.length > 140) {
+              final formattedText = sentenceTextCollector.toString().trim();
+              if (formattedText.isNotEmpty) {
+                localChunks.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
+              }
+              sentenceTextCollector.clear();
+              sentenceWordsCollector.clear();
+            }
+          }
+        }
+      }
+      if (sentenceTextCollector.isNotEmpty) {
+        final formattedText = sentenceTextCollector.toString().trim();
+        if (formattedText.isNotEmpty) {
+          localChunks.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
+        }
+      }
+    }
+    document.dispose();
+    return localChunks;
   }
 
   void _updateWordHighlight(Duration position) {
@@ -759,14 +915,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
   }
 
-  @override
-  void dispose() {
-    _loadedDocument?.dispose();
-    _highlightNotifier.dispose();
-    _tts?.free();
-    super.dispose();
-  }
-
   Future<String> _prepareFile(String assetPath, {String? targetPath}) async {
     try {
       final byteData = await rootBundle.load(assetPath);
@@ -783,7 +931,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   Future<void> _initEngine() async {
-    setState(() { _isReady = false; });
     try {
       final directory = await getApplicationSupportDirectory();
       const esSub = 'shared-espeak-ng-data';
@@ -807,11 +954,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       final espeakDataPath = '${directory.path}/$esSub'.replaceAll('\\', '/');
       sherpa.OfflineTtsModelConfig modelConfig;
 
-      final modelPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.modelFile}', targetPath: _selectedModel.modelFile);
-      final extraPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: _selectedModel.configFile);
+      final modelPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.modelFile}', targetPath: '${_selectedModel.id}_model.onnx');
       final tokensPath = await _prepareFile('${_selectedModel.assetDir}/tokens.txt', targetPath: '${_selectedModel.id}_tokens.txt');
 
+      if (modelPath.isEmpty || tokensPath.isEmpty) throw Exception("Chyba načítání souborů.");
+
       if (_selectedModel.id == 'en_kokoro') {
+        final extraPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: _selectedModel.configFile);
         modelConfig = sherpa.OfflineTtsModelConfig(
           kokoro: sherpa.OfflineTtsKokoroModelConfig(
               model: modelPath, voices: extraPath, tokens: tokensPath, dataDir: espeakDataPath
@@ -819,6 +968,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           numThreads: 4, debug: true,
         );
       } else {
+        await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: '${_selectedModel.id}_config.json');
         modelConfig = sherpa.OfflineTtsModelConfig(
           vits: sherpa.OfflineTtsVitsModelConfig(
             model: modelPath, tokens: tokensPath, dataDir: espeakDataPath,
@@ -830,66 +980,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
       _tts?.free();
       _tts = null;
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 50));
       _tts = sherpa.OfflineTts(sherpa.OfflineTtsConfig(model: modelConfig, maxNumSenetences: 1));
       if (mounted) setState(() => _isReady = true);
     } catch (e) {
       debugPrint('TTS setup error: $e');
-    }
-  }
-
-  void _parseAndStructurePdf(sf.PdfDocument document) {
-    _chunksMetadata.clear();
-    _pregeneratedAudioCache.clear();
-    final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
-    for (int pageIdx = 0; pageIdx < document.pages.count; pageIdx++) {
-      final List<sf.TextLine> textLines = extractor.extractTextLines(startPageIndex: pageIdx, endPageIndex: pageIdx);
-      List<PdfWordGeometry> sentenceWordsCollector = [];
-      StringBuffer sentenceTextCollector = StringBuffer();
-      StringBuffer reconstructedWordText = StringBuffer();
-      Rect? reconstructedWordBounds;
-      for (final sf.TextLine line in textLines) {
-        if (line.wordCollection.isEmpty) continue;
-        for (final sf.TextWord word in line.wordCollection) {
-          String part = word.text;
-          if (reconstructedWordText.isEmpty) {
-            reconstructedWordBounds = word.bounds;
-          } else if (reconstructedWordBounds != null) {
-            reconstructedWordBounds = reconstructedWordBounds.expandToInclude(word.bounds);
-          }
-          reconstructedWordText.write(part);
-          if (part.endsWith(' ') || part == '\n' || part == '\r' || word == line.wordCollection.last) {
-            String cleanWord = reconstructedWordText.toString().trim();
-            reconstructedWordText.clear();
-            if (cleanWord.isEmpty) continue;
-            if (_cleanupMode == 'chytreParsovani') {
-              if (cleanWord.contains(RegExp(r'https?://\S+|www\.\S+'))) continue;
-              if (RegExp(r'^\d+$').hasMatch(cleanWord) || RegExp(r'^\[\d+\]$').hasMatch(cleanWord)) continue;
-            }
-            if (sentenceTextCollector.isEmpty) {
-              sentenceTextCollector.write(cleanWord);
-            } else {
-              sentenceTextCollector.write(" $cleanWord");
-            }
-            if (reconstructedWordBounds != null) sentenceWordsCollector.add(PdfWordGeometry(bounds: reconstructedWordBounds, text: cleanWord));
-            bool isEndOfSentence = cleanWord.endsWith('.') || cleanWord.endsWith('?') || cleanWord.endsWith('!');
-            if (isEndOfSentence || sentenceTextCollector.length > 140) {
-              final formattedText = sentenceTextCollector.toString().trim();
-              if (formattedText.isNotEmpty) {
-                _chunksMetadata.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
-              }
-              sentenceTextCollector.clear();
-              sentenceWordsCollector.clear();
-            }
-          }
-        }
-      }
-      if (sentenceTextCollector.isNotEmpty) {
-        final formattedText = sentenceTextCollector.toString().trim();
-        if (formattedText.isNotEmpty) {
-          _chunksMetadata.add(PdfChunkMetadata(text: formattedText, pageNumber: pageIdx + 1, pdfWords: List.from(sentenceWordsCollector)));
-        }
-      }
     }
   }
 
@@ -915,7 +1010,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     final currentChunk = _chunksMetadata[_currentChunkIndex];
     final int targetPage = currentChunk.pageNumber;
     final sf.PdfPage nativePage = _loadedDocument!.pages[targetPage - 1];
-    final double scaleFactor = _pdfViewerSize.width / nativePage.size.width;
+    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * _currentZoomFactor;
     List<Rect> adjustedSentenceRects = [];
     Rect? adjustedWordRect;
     for (int i = 0; i < currentChunk.pdfWords.length; i++) {
@@ -936,7 +1031,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (!_showOriginalLayout || _chunksMetadata.isEmpty || _pdfViewerSize == Size.zero) return;
     final int currentPage = _pdfViewerController.pageNumber;
     final sf.PdfPage nativePage = _loadedDocument!.pages[currentPage - 1];
-    final double scaleFactor = _pdfViewerSize.width / nativePage.size.width;
+    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * _currentZoomFactor;
     final Offset pdfPointsPos = Offset(d.localPosition.dx / scaleFactor, d.localPosition.dy / scaleFactor);
     for (int chunkIdx = 0; chunkIdx < _chunksMetadata.length; chunkIdx++) {
       final chunk = _chunksMetadata[chunkIdx];
@@ -946,11 +1041,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         if (word.bounds.contains(pdfPointsPos)) {
           setState(() { _currentChunkIndex = chunkIdx; _currentWordIndex = wordIdx; _lastProcessedWordIndex = -1; _isUserScrolling = false; });
           _saveCurrentProgress();
-          if (_isBusy) {
-            _executeChunkReading();
-          } else {
-            _startPdfReading();
-          }
+          if (_isBusy) _executeChunkReading(); else _startPdfReading();
           return;
         }
       }
@@ -988,11 +1079,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   void _stopPdfReading() async {
     setState(() { _isBusy = false; });
-    if (_isMobile) {
-      await _audioHandler.stop();
-    } else {
-      await _windowsPlayer.stop();
-    }
+    if (_isMobile) await _audioHandler.stop(); else await _windowsPlayer.stop();
     _clearPdfHighlights();
   }
 
@@ -1018,7 +1105,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       String? wavPath = _pregeneratedAudioCache[_currentChunkIndex];
       if (wavPath == null) {
         if (rawText.trim().isEmpty || _tts == null) { _skipToNextFailedChunk(); return; }
-        debugPrint('[GEN_TRACE] Spouštím generování pro chunk: $_currentChunkIndex');
         final audio = _tts!.generate(text: rawText, sid: _selectedModel.sid);
         final tempDir = await getTemporaryDirectory();
         wavPath = p.join(tempDir.path, 'chunk_${_currentChunkIndex}_${DateTime.now().millisecondsSinceEpoch}.wav');
@@ -1036,7 +1122,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _bufferNextChunkAsync(_currentChunkIndex + 1);
       }
     } catch (e) {
-      debugPrint('[DEBUG_READ_ERROR] Zachycená výjimka: $e');
       _skipToNextFailedChunk();
     }
   }
@@ -1049,14 +1134,26 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _executeChunkReading();
   }
 
+  void _changeZoom(double delta) {
+    setState(() {
+      _currentZoomFactor = (_currentZoomFactor + delta).clamp(_minZoom, _maxZoom);
+      _pdfViewerController.zoomLevel = _currentZoomFactor;
+      if (_showOriginalLayout) _updatePdfVisualHighlights();
+    });
+  }
+
+  void _handlePointerSignal(PointerSignalEvent event) {
+    if (event is PointerScrollEvent && HardwareKeyboard.instance.isControlPressed) {
+      if (event.scrollDelta.dy < 0) _changeZoom(_zoomStep); else if (event.scrollDelta.dy > 0) _changeZoom(-_zoomStep);
+    }
+  }
+
   Widget _buildCpuIndicator(int load) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: List.generate(3, (i) {
         Color color = Colors.transparent;
-        if (i < load) {
-          color = load == 1 ? Colors.green : (load == 2 ? Colors.orange : Colors.red);
-        }
+        if (i < load) color = load == 1 ? Colors.green : (load == 2 ? Colors.orange : Colors.red);
         return Container(
           width: 3, height: 10,
           margin: const EdgeInsets.symmetric(horizontal: 1),
@@ -1071,138 +1168,230 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     double progress = _chunksMetadata.isEmpty ? 0.0 : _currentChunkIndex / _chunksMetadata.length;
     bool showJumpButton = _selectedChunkIndex != null;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FA),
-      appBar: AppBar(
-        title: Text(widget.book.title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: Color(0xFF1F1F1F))),
-        centerTitle: false, elevation: 0, backgroundColor: Colors.white,
-        surfaceTintColor: Colors.transparent,
-        shape: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1)),
-        actions: [
-          IconButton(
-            icon: Icon(_showOriginalLayout ? Icons.text_snippet_outlined : Icons.picture_as_pdf_outlined, color: const Color(0xFF1A73E8), size: 22),
-            onPressed: () {
-              setState(() => _showOriginalLayout = !_showOriginalLayout);
-              _scrollToCurrentChunk(_currentChunkIndex);
-              if (_showOriginalLayout) _updatePdfVisualHighlights(); else _clearPdfHighlights();
-            },
-          ),
-          if (_showOriginalLayout) IconButton(icon: Icon(_allowZoom ? Icons.zoom_in_rounded : Icons.zoom_out_rounded, color: const Color(0xFF5F6368)), onPressed: () => setState(() => _allowZoom = !_allowZoom)),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                margin: const EdgeInsets.only(bottom: 16.0),
-                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
-                child: Row(
-                  children: [
-                    const Icon(Icons.record_voice_over_outlined, size: 18, color: Color(0xFF1A73E8)),
-                    const SizedBox(width: 10),
-                    const Text('Model:', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F))),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: DropdownButtonHideUnderline(
-                        child: DropdownButton<ModelConfig>(
-                          value: _selectedModel,
-                          isExpanded: true,
-                          icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.grey),
-                          style: const TextStyle(fontSize: 13, color: Color(0xFF1F1F1F), fontWeight: FontWeight.w600),
-                          onChanged: !_isBusy ? (ModelConfig? newValue) {
-                            if (newValue != null) {
-                              setState(() { _selectedModel = newValue; });
-                              _initEngineAndLoadPdf();
-                            }
-                          } : null,
-                          items: availableModels.map<DropdownMenuItem<ModelConfig>>((ModelConfig model) {
-                            return DropdownMenuItem<ModelConfig>(
-                              value: model,
-                              child: Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(4)),
-                                    child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.grey)),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  _buildCpuIndicator(model.cpuLoad),
-                                  const SizedBox(width: 10),
-                                  Expanded(child: Text(model.name, maxLines: 1, overflow: TextOverflow.ellipsis)),
-                                ],
-                              ),
-                            );
-                          }).toList(),
-                        ),
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_keyboardFocusNode.canRequestFocus) _keyboardFocusNode.requestFocus();
+    });
+
+    return CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.arrowUp, control: true): () => _changeZoom(_zoomStep),
+          const SingleActivator(LogicalKeyboardKey.arrowDown, control: true): () => _changeZoom(-_zoomStep),
+        },
+        child: Focus(
+          focusNode: _keyboardFocusNode,
+          child: Scaffold(
+            backgroundColor: const Color(0xFFF8F9FA),
+            appBar: _needsModelSelection
+                ? null
+                : AppBar(
+              automaticallyImplyLeading: true,
+              elevation: 0,
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.transparent,
+              shape: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1)),
+              titleSpacing: 0,
+              title: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.book.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1F1F1F)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Container(
+                    width: 190,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(8)),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<ModelConfig>(
+                        value: _selectedModel,
+                        isExpanded: true,
+                        icon: _isParsingPdf || !_isReady
+                            ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.grey))
+                            : const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.grey, size: 18),
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF1F1F1F), fontWeight: FontWeight.w600),
+                        onChanged: !_isBusy && !_isParsingPdf && _isReady ? (ModelConfig? newValue) {
+                          if (newValue != null) {
+                            setState(() { _selectedModel = newValue; });
+                            _initEngineAndLoadPdf();
+                          }
+                        } : null,
+                        items: availableModels.map<DropdownMenuItem<ModelConfig>>((ModelConfig model) {
+                          return DropdownMenuItem<ModelConfig>(
+                            value: model,
+                            child: Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(3)),
+                                  child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: Colors.grey)),
+                                ),
+                                const SizedBox(width: 6),
+                                _buildCpuIndicator(model.cpuLoad),
+                                const SizedBox(width: 6),
+                                Expanded(child: Text(model.name, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                              ],
+                            ),
+                          );
+                        }).toList(),
                       ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                ],
+              ),
+              actions: [
+                TextButton.icon(
+                  style: TextButton.styleFrom(foregroundColor: const Color(0xFF1A73E8)),
+                  onPressed: () {
+                    setState(() => _showOriginalLayout = !_showOriginalLayout);
+                    _scrollToCurrentChunk(_currentChunkIndex);
+                    if (_showOriginalLayout) _updatePdfVisualHighlights(); else _clearPdfHighlights();
+                  },
+                  icon: Icon(_showOriginalLayout ? Icons.picture_as_pdf : Icons.text_fields_rounded, size: 20),
+                  label: Text(_showOriginalLayout ? 'Původní PDF' : 'Čistý text', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                ),
+                const VerticalDivider(width: 16, indent: 16, endIndent: 16),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(right: 2.0),
+                      child: Icon(Icons.search_rounded, size: 16, color: Color(0xFF1A73E8)),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.remove_circle_outline_rounded, size: 18),
+                      onPressed: () => _changeZoom(-_zoomStep),
+                    ),
+                    Container(
+                      constraints: const BoxConstraints(minWidth: 42),
+                      alignment: Alignment.center,
+                      child: Text(
+                        '${(_currentZoomFactor * 100).toStringAsFixed(0)}%',
+                        style: const TextStyle(fontSize: 12, fontFamily: 'monospace', fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
+                      onPressed: () => _changeZoom(_zoomStep),
                     ),
                   ],
                 ),
-              ),
-              Expanded(
-                child: Stack(
+                const SizedBox(width: 8),
+              ],
+            ),
+            body: SafeArea(
+              child: _needsModelSelection
+                  ? Center(
+                child: Container(
+                  constraints: const BoxConstraints(maxWidth: 400),
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), border: Border.all(color: Colors.grey.shade200)),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.voice_over_off_rounded, size: 48, color: Color(0xFF1A73E8)),
+                      const SizedBox(height: 16),
+                      const Text('Vyberte hlas pro tento dokument', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F1F1F))),
+                      const SizedBox(height: 8),
+                      const Text('Tento dokument nemá přiřazený model. Zvolte výchozí formát čtení:', textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: Colors.grey)),
+                      const SizedBox(height: 24),
+                      ...availableModels.map((model) => Padding(
+                        padding: const EdgeInsets.only(bottom: 10.0),
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(50),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            side: BorderSide(color: Colors.grey.shade300),
+                          ),
+                          onPressed: () => _selectInitialModel(model),
+                          child: Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(4)),
+                                child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF1A73E8))),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(child: Text(model.name, style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF1F1F1F)))),
+                              _buildCpuIndicator(model.cpuLoad),
+                            ],
+                          ),
+                        ),
+                      )),
+                    ],
+                  ),
+                ),
+              )
+                  : Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    children: [
+                  Expanded(
+                  child: Stack(
                   children: [
                     Container(
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                        color: Colors.white, borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.grey.shade200),
-                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 12, offset: const Offset(0, 4))],
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(16),
-                        child: _isParsingPdf
-                            ? const Center(child: DynamicPositionsParserIndicator())
-                            : IndexedStack(
-                          index: _showOriginalLayout ? 1 : 0,
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.all(8.0),
-                              child: ScrollablePositionedList.builder(
-                                itemScrollController: _itemScrollController,
-                                itemPositionsListener: _itemPositionsListener,
-                                itemCount: _chunksMetadata.length,
-                                itemBuilder: (context, index) {
-                                  bool isCurrent = _isBusy && index == _currentChunkIndex;
-                                  bool isSelected = index == _selectedChunkIndex;
-                                  return InkWell(
-                                    onTap: () => setState(() { _selectedChunkIndex = index; }),
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: AnimatedContainer(
-                                      duration: const Duration(milliseconds: 150),
-                                      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: isCurrent
-                                            ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3)
-                                            : (isSelected ? Colors.orange.shade50 : Colors.transparent),
-                                        borderRadius: BorderRadius.circular(8),
-                                        border: isSelected ? Border.all(color: Colors.orange.shade400, width: 1.5) : null,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: Colors.white, borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.grey.shade200),
+                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 12, offset: const Offset(0, 4))],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: _isParsingPdf
+                          ? const Center(child: DynamicPositionsParserIndicator())
+                          : IndexedStack(
+                        index: _showOriginalLayout ? 1 : 0,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.all(8.0),
+                            child: ScrollablePositionedList.builder(
+                              itemScrollController: _itemScrollController,
+                              itemPositionsListener: _itemPositionsListener,
+                              itemCount: _chunksMetadata.length,
+                              itemBuilder: (context, index) {
+                                bool isCurrent = _isBusy && index == _currentChunkIndex;
+                                bool isSelected = index == _selectedChunkIndex;
+                                return InkWell(
+                                  onTap: () => setState(() { _selectedChunkIndex = index; }),
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 150),
+                                    margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      color: isCurrent
+                                          ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3)
+                                          : (isSelected ? Colors.orange.shade50 : Colors.transparent),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: isSelected ? Border.all(color: Colors.orange.shade400, width: 1.5) : null,
+                                    ),
+                                    child: isCurrent
+                                        ? RichText(
+                                      text: TextSpan(
+                                        style: TextStyle(fontSize: 17 * _currentZoomFactor, height: 1.6, color: Colors.black87),
+                                        children: _buildHighlightedWords(_chunksMetadata[index].text, context),
                                       ),
-                                      child: isCurrent
-                                          ? RichText(
-                                        text: TextSpan(
-                                          style: const TextStyle(fontSize: 17, height: 1.6, color: Colors.black87),
-                                          children: _buildHighlightedWords(_chunksMetadata[index].text, context),
-                                        ),
-                                      )
-                                          : Text(
-                                        _chunksMetadata[index].text,
-                                        style: TextStyle(
-                                          fontSize: 16, height: 1.6,
-                                          color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
-                                        ),
+                                    )
+                                        : Text(
+                                      _chunksMetadata[index].text,
+                                      style: TextStyle(
+                                        fontSize: 16 * _currentZoomFactor, height: 1.6,
+                                        color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
                                       ),
                                     ),
-                                  );
-                                },
-                              ),
+                                  ),
+                                );
+                              },
                             ),
-                            LayoutBuilder(
+                          ),
+                          Listener(
+                            onPointerSignal: _handlePointerSignal,
+                            child: LayoutBuilder(
                               builder: (context, constraints) {
                                 _pdfViewerSize = Size(constraints.maxWidth, constraints.maxHeight);
                                 return GestureDetector(
@@ -1212,8 +1401,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                       SfPdfViewer.file(
                                         File(widget.book.filePath),
                                         controller: _pdfViewerController,
+                                        pageLayoutMode: PdfPageLayoutMode.single,
                                         canShowScrollHead: false, canShowTextSelectionMenu: false,
-                                        enableDoubleTapZooming: _allowZoom, enableDocumentLinkAnnotation: _allowZoom,
+                                        enableDoubleTapZooming: true, enableDocumentLinkAnnotation: true,
+                                        onDocumentLoaded: (details) {
+                                          _pdfViewerController.zoomLevel = _currentZoomFactor;
+                                        },
                                       ),
                                       IgnorePointer(
                                         child: ValueListenableBuilder<HighlightData>(
@@ -1232,74 +1425,75 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                 );
                               },
                             ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    if (_isUserScrolling)
-                      Positioned(
-                        bottom: 16, right: 16,
-                        child: FloatingActionButton.small(
-                          onPressed: _recenterToCurrentChunk,
-                          backgroundColor: const Color(0xFF1A73E8),
-                          foregroundColor: Colors.white,
-                          child: const Icon(Icons.center_focus_strong_rounded),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              if (!_isParsingPdf) ...[
-                const SizedBox(height: 16),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.grid_view_rounded, size: 14, color: Colors.grey),
-                          const SizedBox(width: 6),
-                          Text('Blok: ${_currentChunkIndex + 1} / ${_chunksMetadata.length}', style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368), fontWeight: FontWeight.w600)),
+                          ),
                         ],
                       ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 12),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(value: progress, backgroundColor: Colors.grey.shade200, color: Theme.of(context).colorScheme.primary, minHeight: 6),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: SizedBox(
-                        height: 54,
-                        child: showJumpButton
-                            ? FilledButton.icon(
-                          onPressed: _jumpToSelectedAndPlay,
-                          style: FilledButton.styleFrom(backgroundColor: Colors.orange.shade700, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-                          icon: const Icon(Icons.play_circle_filled_rounded), label: const Text('SPUSTIT OD VYBRANÉHO MÍSTA', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.2)),
-                        )
-                            : FilledButton.icon(
-                          onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
-                          style: FilledButton.styleFrom(backgroundColor: _isBusy ? Colors.red.shade600 : const Color(0xFF1A73E8), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-                          icon: Icon(_isBusy ? Icons.stop_rounded : Icons.play_arrow_rounded, size: 22),
-                          label: Text(_isBusy ? 'ZASTAVIT ČTENÍ' : 'SPUSTIT PŘEHRÁVÁNÍ', style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.2)),
-                        ),
-                      ),
                     ),
-                  ],
-                ),
-              ],
+                  ),
+                  if (_isUserScrolling)
+              Positioned(
+              bottom: 16, right: 16,
+              child: FloatingActionButton.small(
+                onPressed: _recenterToCurrentChunk,
+                backgroundColor: const Color(0xFF1A73E8),
+                foregroundColor: Colors.white,
+                child: const Icon(Icons.center_focus_strong_rounded),
+              ),
+            ),
             ],
           ),
         ),
-      ),
-    );
+        if (!_isParsingPdf) ...[
+    const SizedBox(height: 16),
+    Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+    child: Row(
+    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    children: [
+    Row(
+    children: [
+    const Icon(Icons.grid_view_rounded, size: 14, color: Colors.grey),
+    const SizedBox(width: 6),
+    Text('Blok: ${_currentChunkIndex + 1} / ${_chunksMetadata.length}', style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368), fontWeight: FontWeight.w600)),
+    ],
+    ),
+    ],
+    ),
+    ),
+    const SizedBox(height: 12),
+    ClipRRect(
+    borderRadius: BorderRadius.circular(4),
+    child: LinearProgressIndicator(value: progress, backgroundColor: Colors.grey.shade200, color: Theme.of(context).colorScheme.primary, minHeight: 6),
+    ),
+    const SizedBox(height: 16),
+    Row(
+    children: [
+    Expanded(
+    child: SizedBox(
+    height: 54,
+    child: showJumpButton
+    ? FilledButton.icon(
+    onPressed: _jumpToSelectedAndPlay,
+    style: FilledButton.styleFrom(backgroundColor: Colors.orange.shade700, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+    icon: const Icon(Icons.play_circle_filled_rounded), label: const Text('SPUSTIT OD VYBRANÉHO MÍSTA', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.2)),
+    )
+        : FilledButton.icon(
+    onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
+    style: FilledButton.styleFrom(backgroundColor: _isBusy ? Colors.red.shade600 : const Color(0xFF1A73E8), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+    icon: Icon(_isBusy ? Icons.stop_rounded : Icons.play_arrow_rounded, size: 22),
+    label: Text(_isBusy ? 'ZASTAVIT ČTENÍ' : 'SPUSTIT PŘEHRÁVÁNÍ', style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.2)),
+    ),
+    ),
+    ),
+    ],
+    ),
+    ],
+    ]),
+    ),
+    ),
+    ),
+    ));
   }
 
   List<TextSpan> _buildHighlightedWords(String text, BuildContext context) {
