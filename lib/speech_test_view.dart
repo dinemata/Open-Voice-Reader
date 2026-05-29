@@ -603,23 +603,53 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       _clearPdfHighlights();
       return;
     }
+
     final currentChunk = _chunksMetadata[_currentChunkIndex];
     final int targetPage = currentChunk.pageNumber;
+
+    if (_pdfViewerController.pageNumber != targetPage) {
+      _clearPdfHighlights();
+      return;
+    }
+
     final sf.PdfPage nativePage = _loadedDocument!.pages[targetPage - 1];
-    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * (_pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor);
+
+    final double pageAspectRatio = nativePage.size.width / nativePage.size.height;
+    final double viewerAspectRatio = _pdfViewerSize.width / _pdfViewerSize.height;
+
+    double renderedWidth;
+    double renderedHeight;
+
+    if (pageAspectRatio > viewerAspectRatio) {
+      renderedWidth = _pdfViewerSize.width;
+      renderedHeight = renderedWidth / pageAspectRatio;
+    } else {
+      renderedHeight = _pdfViewerSize.height;
+      renderedWidth = renderedHeight * pageAspectRatio;
+    }
+
+    final double scaleFactor = (renderedWidth / nativePage.size.width) * _pdfZoomFactor;
+
+    final double offsetX = (_pdfViewerSize.width - (renderedWidth * _pdfZoomFactor)) / 2;
+    final double offsetY = (_pdfViewerSize.height - (renderedHeight * _pdfZoomFactor)) / 2;
+
     List<Rect> adjustedSentenceRects = [];
     Rect? adjustedWordRect;
+
     for (int i = 0; i < currentChunk.pdfWords.length; i++) {
       final pdfWord = currentChunk.pdfWords[i];
+
       final scaledRect = Rect.fromLTWH(
-        pdfWord.bounds.left * scaleFactor,
-        pdfWord.bounds.top * scaleFactor,
+        (pdfWord.bounds.left * scaleFactor) + (offsetX > 0 ? offsetX : 0),
+        (pdfWord.bounds.top * scaleFactor) + (offsetY > 0 ? offsetY : 0),
         pdfWord.bounds.width * scaleFactor,
         pdfWord.bounds.height * scaleFactor,
       );
+
       adjustedSentenceRects.add(scaledRect);
       if (_isBusy && i == _currentWordIndex) adjustedWordRect = scaledRect;
     }
+
     _highlightNotifier.value = HighlightData(sentenceRects: adjustedSentenceRects, wordRect: adjustedWordRect);
   }
 
@@ -1365,18 +1395,19 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                                 SfPdfViewer.file(
                                                   File(widget.book.filePath),
                                                   controller: _pdfViewerController,
-                                                  pageLayoutMode: PdfPageLayoutMode.continuous,
+                                                  pageLayoutMode: PdfPageLayoutMode.single,
                                                   canShowScrollHead: false,
                                                   canShowTextSelectionMenu: false,
-                                                  enableDoubleTapZooming: _pdfZoomFactor >= 1.0,
+                                                  enableDoubleTapZooming: true,
                                                   enableDocumentLinkAnnotation: true,
                                                   onTextSelectionChanged: null,
                                                   onDocumentLoaded: (details) {
-                                                    _pdfViewerController.zoomLevel = _pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor;
+                                                    _pdfViewerController.zoomLevel = _pdfZoomFactor;
                                                     _updatePdfVisualHighlights();
                                                   },
                                                   onPageChanged: (details) {
                                                     setState(() { globalCurrentPdfPage = details.newPageNumber; });
+                                                    _updatePdfVisualHighlights();
                                                   },
                                                   onZoomLevelChanged: (details) {
                                                     setState(() {
