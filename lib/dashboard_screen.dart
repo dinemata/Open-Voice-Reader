@@ -144,24 +144,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _openBook(BookModel book) async {
-    // 3. BOD: Přesun na první místo v seznamu
-    setState(() {
-      _books.removeWhere((b) => b.id == book.id);
-      _books.insert(0, book);
-    });
+    final int targetIdx = _books.indexWhere((b) => b.id == book.id);
+    if (targetIdx != -1) {
+      setState(() {
+        _books.removeAt(targetIdx);
+        _books.insert(0, book);
+      });
+    }
 
-    // Uložení aktualizovaného pořadí do SharedPreferences
     final prefs = await SharedPreferences.getInstance();
     final String encoded = jsonEncode(_books.map((b) => b.toMap()).toList());
-    await prefs.setString('book_history', encoded);
+    await prefs.setString('saved_books', encoded);
 
-    // Samotné otevření obrazovky
+    if (!mounted) return;
+
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => SpeechTestView(book: book),
       ),
     ).then((_) {
-      // Po návratu z view překreslíme dashboard, aby reflektoval změny stavu
       setState(() {});
     });
   }

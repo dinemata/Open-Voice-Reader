@@ -27,6 +27,9 @@ bool globalIsOriginalLayout = false;
 int globalCurrentPdfPage = 1;
 int globalTotalPdfPages = 1;
 
+List<PdfChunkMetadata> globalCachedChunks = [];
+sf.PdfDocument? globalCachedDocument;
+
 class SpeechTestView extends StatefulWidget {
   final BookModel book;
   const SpeechTestView({super.key, required this.book});
@@ -75,6 +78,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   bool _isMaxZoomReached = false;
   bool _isMinZoomReached = false;
+  String _loadingStatusText = "Inicializace...";
 
   bool get _isTxtFile => widget.book.filePath.toLowerCase().endsWith('.txt');
   double get _currentZoomFactor => globalIsOriginalLayout ? _pdfZoomFactor : _textZoomFactor;
@@ -88,16 +92,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       _currentWordIndex = globalCurrentWordIndex;
       _isBusy = globalIsAudioBusy;
     } else {
-      globalActiveBookId = widget.book.id;
       _currentChunkIndex = widget.book.lastChunkIndex;
       _currentWordIndex = 0;
       _isBusy = false;
-      globalCurrentChunkIndex = _currentChunkIndex;
-      globalCurrentWordIndex = _currentWordIndex;
-      globalIsAudioBusy = _isBusy;
-      globalIsOriginalLayout = false;
-      globalCurrentPdfPage = 1;
-      globalTotalPdfPages = 1;
     }
 
     if (widget.book.lastModelId != null) {
@@ -199,19 +196,19 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _initEngineAndLoadPdf();
   }
 
-  List<PdfChunkMetadata> globalCachedChunks = [];
-  sf.PdfDocument? globalCachedDocument;
-
   Future<void> _initEngineAndLoadPdf() async {
-    // RECEPT: Pokud otevíráme stejný soubor, okamžitě naplníme lokální stav z globální cache
     if (globalActiveBookId == widget.book.id && globalCachedChunks.isNotEmpty) {
+      setState(() {
+        _loadingStatusText = "Přenáším text do čtečky...";
+      });
+
       _chunksMetadata.clear();
       _chunksMetadata.addAll(globalCachedChunks);
       _loadedDocument = globalCachedDocument;
 
+      await _initEngine();
+
       setState(() {
-        _currentChunkIndex = globalCurrentChunkIndex;
-        _currentWordIndex = globalCurrentWordIndex;
         _isReady = true;
         _isParsingPdf = false;
       });
@@ -220,7 +217,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       return;
     }
 
-    // Pokud otevíráme jiný soubor, vyčistíme starou cache a stopneme audio
     if (globalActiveBookId != null && globalActiveBookId != widget.book.id) {
       if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
         await audioHandler.stop();
@@ -242,6 +238,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       _isParsingPdf = true;
       _isReady = false;
       _parsingProgress = 0.0;
+      _loadingStatusText = "Chystám soubor...";
     });
 
     globalActiveBookId = widget.book.id;
@@ -253,7 +250,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       if (!await file.exists()) throw Exception("File does not exist.");
 
       if (_isTxtFile) {
+        setState(() {
+          _loadingStatusText = "Rozřazuji text do odstavců...";
+        });
         final content = await file.readAsString();
+        final List<PdfChunkMetadata> tempTxtChunks = [];
+
         _parseTxtWithProgress(content).listen(
               (progressValue) {
             if (!mounted) return;
@@ -262,37 +264,43 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           onDone: () {
             if (!mounted) return;
 
+            if (_chunksMetadata.isEmpty && tempTxtChunks.isEmpty) {
+              tempTxtChunks.add(PdfChunkMetadata(text: "Soubor neobsahuje žádný text.", pageNumber: 1, pdfWords: []));
+            }
+
+            _chunksMetadata.clear();
+            _chunksMetadata.addAll(tempTxtChunks);
             globalCachedChunks = List.from(_chunksMetadata);
             globalCachedDocument = null;
 
             setState(() {
               globalTotalPdfPages = 1;
+              _isReady = true;
               _isParsingPdf = false;
-              if (_chunksMetadata.isEmpty) {
-                _chunksMetadata.add(PdfChunkMetadata(text: "Soubor neobsahuje žádný text.", pageNumber: 1, pdfWords: []));
-                globalCachedChunks = List.from(_chunksMetadata);
-              }
               _recenterToCurrentChunk();
             });
           },
         );
       } else {
+        setState(() {
+          _loadingStatusText = "Mapuji strukturu stránek...";
+        });
         final bytes = await file.readAsBytes();
         _loadedDocument = sf.PdfDocument(inputBytes: bytes);
         globalTotalPdfPages = _loadedDocument!.pages.count;
         globalCachedDocument = _loadedDocument;
 
+        setState(() {
+          _loadingStatusText = "Zaměřuji pozici slov pro zvýrazňování textu...";
+        });
+
+        final List<PdfChunkMetadata> tempPdfChunks = [];
+
         TextSanitizer.parsePdfWithProgress(
           bytes: bytes,
-          chunksTarget: _chunksMetadata,
+          chunksTarget: tempPdfChunks,
           options: _sanitizerOptions,
-          onChunkReady: () {
-            if (mounted && _chunksMetadata.isNotEmpty && _currentChunkIndex < _chunksMetadata.length) {
-              setState(() {
-                globalCurrentPdfPage = _chunksMetadata[_currentChunkIndex].pageNumber;
-              });
-            }
-          },
+          onChunkReady: () {},
         ).listen(
               (progressValue) {
             if (!mounted) return;
@@ -301,21 +309,29 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           onDone: () {
             if (!mounted) return;
 
+            if (tempPdfChunks.isEmpty) {
+              tempPdfChunks.add(PdfChunkMetadata(text: "PDF neobsahuje žádný text.", pageNumber: 1, pdfWords: []));
+            }
+
+            _chunksMetadata.clear();
+            _chunksMetadata.addAll(tempPdfChunks);
             globalCachedChunks = List.from(_chunksMetadata);
 
             setState(() {
+              _isReady = true;
               _isParsingPdf = false;
-              if (_chunksMetadata.isEmpty) {
-                _chunksMetadata.add(PdfChunkMetadata(text: "PDF neobsahuje žádný text.", pageNumber: 1, pdfWords: []));
-                globalCachedChunks = List.from(_chunksMetadata);
-              }
               _recenterToCurrentChunk();
             });
           },
         );
       }
     } catch (e) {
-      if (mounted) setState(() { _isParsingPdf = false; });
+      if (mounted) {
+        setState(() {
+          _isParsingPdf = false;
+          _isReady = true;
+        });
+      }
     }
   }
 
@@ -400,9 +416,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   Future<void> _initEngine() async {
     if (globalCurrentModelId == _selectedModel.id && globalTts != null) {
-      if (mounted) setState(() => _isReady = true);
       return;
     }
+
+    setState(() {
+      _loadingStatusText = "Načítám TTS model: ${_selectedModel.name}...";
+    });
 
     try {
       final directory = await getApplicationSupportDirectory();
@@ -459,7 +478,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       await Future.delayed(const Duration(milliseconds: 50));
       globalTts = sherpa.OfflineTts(sherpa.OfflineTtsConfig(model: modelConfig, maxNumSenetences: 1));
       globalCurrentModelId = _selectedModel.id;
-      if (mounted) setState(() => _isReady = true);
     } catch (e) {
       debugPrint('TTS setup error: $e');
     }
@@ -473,9 +491,23 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _isProgrammaticScrolling = true;
         final chunk = _chunksMetadata[index];
 
-        WidgetsBinding.instance.addPostFrameCallback((_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
           if (!mounted) return;
+
           _pdfViewerController.jumpToPage(chunk.pageNumber);
+
+          if (chunk.text.trim().isNotEmpty) {
+            try {
+              final searchResult = await _pdfViewerController.searchText(
+                chunk.text,
+              );
+
+              if (searchResult.hasResult) {
+                searchResult.nextInstance();
+                searchResult.clear();
+              }
+            } catch (_) {}
+          }
         });
 
         _isProgrammaticScrolling = false;
@@ -741,7 +773,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _handlePopAction() {
-    // Ignorujeme jakékoliv zastavování. Audio handler i windowsPlayer běží dál.
     Navigator.of(context).pop();
   }
 
@@ -1001,97 +1032,95 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   ],
                 ),
                 PopupMenuButton<String>(
-                    offset: const Offset(0, 40),
-                    constraints: const BoxConstraints(minWidth: 180, maxWidth: 220),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    // Nastavením transparentního pozadí a nulových paddingů v splash struktuře zničíme šedé artefakty
-                    splashRadius: 20,
-                    tooltip: 'Parametry parsování',
-                    onSelected: (value) async {
-                      setState(() {
-                        if (value == 'parentheses') {
-                          _sanitizerOptions.readParentheses = !_sanitizerOptions.readParentheses;
-                        } else if (value == 'links') {
-                          _sanitizerOptions.readLinks = !_sanitizerOptions.readLinks;
-                        } else if (value == 'pages') {
-                          _sanitizerOptions.readPageNumbers = !_sanitizerOptions.readPageNumbers;
-                        }
-                      });
-                      if (!_isParsingPdf && _isReady) {
-                        _initEngineAndLoadPdf();
+                  offset: const Offset(0, 40),
+                  constraints: const BoxConstraints(minWidth: 180, maxWidth: 220),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  splashRadius: 20,
+                  tooltip: 'Parametry parsování',
+                  onSelected: (value) async {
+                    setState(() {
+                      if (value == 'parentheses') {
+                        _sanitizerOptions.readParentheses = !_sanitizerOptions.readParentheses;
+                      } else if (value == 'links') {
+                        _sanitizerOptions.readLinks = !_sanitizerOptions.readLinks;
+                      } else if (value == 'pages') {
+                        _sanitizerOptions.readPageNumbers = !_sanitizerOptions.readPageNumbers;
                       }
-                    },
-                    itemBuilder: (BuildContext context) => [
-                      PopupMenuItem(
-                        value: 'parentheses',
-                        height: 38,
-                        child: Row(
-                          children: [
-                            SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: Checkbox(
-                                value: _sanitizerOptions.readParentheses,
-                                activeColor: const Color(0xFF1A73E8),
-                                onChanged: (bool? val) {
-                                  Navigator.pop(context, 'parentheses');
-                                },
-                              ),
+                    });
+                    if (!_isParsingPdf && _isReady) {
+                      _initEngineAndLoadPdf();
+                    }
+                  },
+                  itemBuilder: (BuildContext context) => [
+                    PopupMenuItem(
+                      value: 'parentheses',
+                      height: 38,
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: Checkbox(
+                              value: _sanitizerOptions.readParentheses,
+                              activeColor: const Color(0xFF1A73E8),
+                              onChanged: (bool? val) {
+                                Navigator.pop(context, 'parentheses');
+                              },
                             ),
-                            const SizedBox(width: 8),
-                            const Text('Číst závorky', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                          ],
-                        ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text('Číst závorky', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                        ],
                       ),
-                      PopupMenuItem(
-                        value: 'links',
-                        height: 38,
-                        child: Row(
-                          children: [
-                            SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: Checkbox(
-                                value: _sanitizerOptions.readLinks,
-                                activeColor: const Color(0xFF1A73E8),
-                                onChanged: (bool? val) {
-                                  Navigator.pop(context, 'links');
-                                },
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            const Text('Číst odkazy', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                          ],
-                        ),
-                      ),
-                      PopupMenuItem(
-                        value: 'pages',
-                        height: 38,
-                        child: Row(
-                          children: [
-                            SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: Checkbox(
-                                value: _sanitizerOptions.readPageNumbers,
-                                activeColor: const Color(0xFF1A73E8),
-                                onChanged: (bool? val) {
-                                  Navigator.pop(context, 'pages');
-                                },
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            const Text('Číst čísla stran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                          ],
-                        ),
-                      ),
-                    ],
-                    // Tímto child parametrem vynutíme čisté vykreslení bez interního IconButton wrapperu z Material knhovny
-                    child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                      child: Icon(Icons.tune_rounded, color: Color(0xFF5F6368), size: 20),
                     ),
+                    PopupMenuItem(
+                      value: 'links',
+                      height: 38,
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: Checkbox(
+                              value: _sanitizerOptions.readLinks,
+                              activeColor: const Color(0xFF1A73E8),
+                              onChanged: (bool? val) {
+                                Navigator.pop(context, 'links');
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text('Číst odkazy', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'pages',
+                      height: 38,
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: Checkbox(
+                              value: _sanitizerOptions.readPageNumbers,
+                              activeColor: const Color(0xFF1A73E8),
+                              onChanged: (bool? val) {
+                                Navigator.pop(context, 'pages');
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text('Číst čísla stran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                        ],
+                      ),
+                    ),
+                  ],
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    child: Icon(Icons.tune_rounded, color: Color(0xFF5F6368), size: 20),
                   ),
+                ),
                 IconButton(
                   icon: Icon(_isFullscreen ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded),
                   onPressed: () => setState(() => _isFullscreen = !_isFullscreen),
@@ -1160,7 +1189,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                           ),
                           child: ClipRRect(
                             borderRadius: _isFullscreen ? BorderRadius.zero : BorderRadius.circular(16),
-                            child: _isParsingPdf
+                            child: (_isParsingPdf || !_isReady)
                                 ? Center(
                               child: Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
@@ -1168,8 +1197,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                   const CircularProgressIndicator(strokeWidth: 3),
                                   const SizedBox(height: 24),
                                   Text(
-                                    'Načítám text a strukturu dokumentu... (${(_parsingProgress * 100).toStringAsFixed(0)}%)',
+                                    '$_loadingStatusText (${(_parsingProgress * 100).toStringAsFixed(0)}%)',
                                     style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: 13),
+                                    textAlign: TextAlign.center,
                                   ),
                                   const SizedBox(height: 16),
                                   Container(
@@ -1240,8 +1270,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                     onPointerSignal: _handlePointerSignal,
                                     child: NotificationListener<ScrollNotification>(
                                       onNotification: (notification) {
-                                        if (!_isProgrammaticScrolling && (notification is ScrollUpdateNotification || notification is OverscrollNotification)) {
-                                          if (!_isUserScrolling) { setState(() { _isUserScrolling = true; }); }
+                                        if (notification is ScrollUpdateNotification || notification is OverscrollNotification) {
+                                          if (!_isProgrammaticScrolling && !_isUserScrolling) {
+                                            setState(() { _isUserScrolling = true; });
+                                          }
+                                          _updatePdfVisualHighlights();
                                         }
                                         return false;
                                       },
@@ -1251,62 +1284,55 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                           return GestureDetector(
                                             behavior: HitTestBehavior.opaque,
                                             onTapUp: _handlePdfTap,
-                                            child: FractionallySizedBox(
-                                              widthFactor: _pdfZoomFactor < 1.0 ? _pdfZoomFactor : 1.0,
-                                              heightFactor: _pdfZoomFactor < 1.0 ? _pdfZoomFactor : 1.0,
-                                              alignment: Alignment.topCenter,
-                                              child: Stack(
-                                                children: [
-                                                  SfPdfViewer.file(
-                                                    File(widget.book.filePath),
-                                                    controller: _pdfViewerController,
-                                                    pageLayoutMode: PdfPageLayoutMode.continuous,
-                                                    canShowScrollHead: false,
-                                                    canShowTextSelectionMenu: false,
-                                                    enableDoubleTapZooming: _pdfZoomFactor >= 1.0,
-                                                    enableDocumentLinkAnnotation: true,
-                                                    onTextSelectionChanged: null,
-                                                    onDocumentLoaded: (details) {
-                                                      _pdfViewerController.zoomLevel = _pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor;
-                                                      _updatePdfVisualHighlights();
-                                                    },
-                                                    onPageChanged: (details) {
-                                                      setState(() { globalCurrentPdfPage = details.newPageNumber; });
-                                                    },
-                                                    onZoomLevelChanged: (details) {
-                                                      setState(() {
-                                                        _pdfZoomFactor = details.newZoomLevel;
-                                                        _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
-                                                        _isMinZoomReached = _pdfZoomFactor <= _minZoom;
-                                                      });
-                                                      _updatePdfVisualHighlights();
-                                                    },
-                                                  ),
-                                                  IgnorePointer(
-                                                    child: ValueListenableBuilder<HighlightData>(
-                                                      valueListenable: _highlightNotifier,
-                                                      builder: (context, data, _) => CustomPaint(
-                                                        size: Size.infinite,
-                                                        painter: PdfHighlightPainter(
-                                                          sentenceRects: data.sentenceRects,
-                                                          wordRect: data.wordRect,
-                                                          primaryColor: _isBusy
-                                                              ? Theme.of(context).colorScheme.primary
-                                                              : Theme.of(context).colorScheme.primary.withOpacity(0.5),
-                                                        ),
+                                            child: Stack(
+                                              children: [
+                                                SfPdfViewer.file(
+                                                  File(widget.book.filePath),
+                                                  controller: _pdfViewerController,
+                                                  pageLayoutMode: PdfPageLayoutMode.continuous,
+                                                  canShowScrollHead: false,
+                                                  canShowTextSelectionMenu: false,
+                                                  enableDoubleTapZooming: _pdfZoomFactor >= 1.0,
+                                                  enableDocumentLinkAnnotation: true,
+                                                  onTextSelectionChanged: null,
+                                                  onDocumentLoaded: (details) {
+                                                    _pdfViewerController.zoomLevel = _pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor;
+                                                    _updatePdfVisualHighlights();
+                                                  },
+                                                  onPageChanged: (details) {
+                                                    setState(() { globalCurrentPdfPage = details.newPageNumber; });
+                                                  },
+                                                  onZoomLevelChanged: (details) {
+                                                    setState(() {
+                                                      _pdfZoomFactor = details.newZoomLevel;
+                                                      _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
+                                                      _isMinZoomReached = _pdfZoomFactor <= _minZoom;
+                                                    });
+                                                    _updatePdfVisualHighlights();
+                                                  },
+                                                ),
+                                                IgnorePointer(
+                                                  child: ValueListenableBuilder<HighlightData>(
+                                                    valueListenable: _highlightNotifier,
+                                                    builder: (context, data, _) => CustomPaint(
+                                                      size: Size.infinite,
+                                                      painter: PdfHighlightPainter(
+                                                        sentenceRects: data.sentenceRects,
+                                                        wordRect: data.wordRect,
+                                                        primaryColor: _isBusy
+                                                            ? Theme.of(context).colorScheme.primary
+                                                            : Theme.of(context).colorScheme.primary.withOpacity(0.5),
                                                       ),
                                                     ),
                                                   ),
-                                                ],
-                                              ),
+                                                ),
+                                              ],
                                             ),
                                           );
                                         },
                                       ),
                                     ),
-                                  )
-                                else
-                                  const SizedBox.shrink(),
+                                  ),
                               ],
                             ),
                           ),
