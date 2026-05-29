@@ -264,6 +264,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final f = File(book.coverPath!);
       if (f.existsSync()) f.deleteSync();
     }
+
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final cacheFile = File(p.join(appDir.path, 'book_cache', '${book.id}.cache'));
+      if (cacheFile.existsSync()) {
+        cacheFile.deleteSync();
+      }
+    } catch (e) {
+      debugPrint('Error deleting disk cache file: $e');
+    }
+
     setState(() { _books.removeWhere((b) => b.id == book.id); });
     await _saveHistory();
   }
@@ -466,6 +477,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 borderRadius: BorderRadius.circular(16),
                                 child: InkWell(
                                   onTap: () => _openBook(book),
+                                  borderRadius: BorderRadius.circular(16),
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [

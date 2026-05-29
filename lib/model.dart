@@ -103,6 +103,19 @@ class PdfWordGeometry {
   final Rect bounds;
   final String text;
   PdfWordGeometry({required this.bounds, required this.text});
+
+  Map<String, dynamic> toMap() => {
+    'text': text,
+    'left': bounds.left,
+    'top': bounds.top,
+    'width': bounds.width,
+    'height': bounds.height,
+  };
+
+  factory PdfWordGeometry.fromMap(Map<String, dynamic> map) => PdfWordGeometry(
+    text: map['text'],
+    bounds: Rect.fromLTWH(map['left'], map['top'], map['width'], map['height']),
+  );
 }
 
 class PdfChunkMetadata {
@@ -110,6 +123,18 @@ class PdfChunkMetadata {
   final int pageNumber;
   final List<PdfWordGeometry> pdfWords;
   PdfChunkMetadata({required this.text, required this.pageNumber, required this.pdfWords});
+
+  Map<String, dynamic> toMap() => {
+    'text': text,
+    'pageNumber': pageNumber,
+    'pdfWords': pdfWords.map((w) => w.toMap()).toList(),
+  };
+
+  factory PdfChunkMetadata.fromMap(Map<String, dynamic> map) => PdfChunkMetadata(
+    text: map['text'],
+    pageNumber: map['pageNumber'],
+    pdfWords: (map['pdfWords'] as List).map((w) => PdfWordGeometry.fromMap(w)).toList(),
+  );
 }
 
 class HighlightData {
@@ -123,6 +148,7 @@ class PdfHighlightPainter extends CustomPainter {
   final Rect? wordRect;
   final Color primaryColor;
   PdfHighlightPainter({required this.sentenceRects, required this.wordRect, required this.primaryColor});
+
   @override
   void paint(Canvas canvas, Size size) {
     final sentencePaint = Paint()..color = primaryColor.withOpacity(0.15)..style = PaintingStyle.fill;
@@ -132,6 +158,7 @@ class PdfHighlightPainter extends CustomPainter {
       canvas.drawRect(wordRect!, wordPaint);
     }
   }
+
   @override
   bool shouldRepaint(covariant PdfHighlightPainter oldDelegate) =>
       oldDelegate.sentenceRects != sentenceRects || oldDelegate.wordRect != wordRect;

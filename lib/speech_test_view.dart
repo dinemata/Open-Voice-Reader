@@ -199,6 +199,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   Future<void> _initEngineAndLoadPdf() async {
     if (globalActiveBookId == widget.book.id && globalCachedChunks.isNotEmpty) {
       setState(() {
+        _parsingProgress = 0.9;
         _loadingStatusText = "Přenáším text do čtečky...";
       });
 
@@ -209,6 +210,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       await _initEngine();
 
       setState(() {
+        _parsingProgress = 1.0;
         _isReady = true;
         _isParsingPdf = false;
       });
@@ -245,6 +247,36 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     await _initEngine();
 
+    final diskCache = await _loadCacheFromDisk(widget.book.id);
+    if (diskCache != null && diskCache.isNotEmpty) {
+      setState(() {
+        _parsingProgress = 0.9;
+        _loadingStatusText = "Načítám uloženou strukturu z disku...";
+      });
+
+      _chunksMetadata.clear();
+      _chunksMetadata.addAll(diskCache);
+      globalCachedChunks = List.from(_chunksMetadata);
+
+      if (!_isTxtFile) {
+        try {
+          final file = File(widget.book.filePath);
+          final bytes = await file.readAsBytes();
+          _loadedDocument = sf.PdfDocument(inputBytes: bytes);
+          globalTotalPdfPages = _loadedDocument!.pages.count;
+          globalCachedDocument = _loadedDocument;
+        } catch (_) {}
+      }
+
+      setState(() {
+        _parsingProgress = 1.0;
+        _isReady = true;
+        _isParsingPdf = false;
+      });
+      _recenterToCurrentChunk();
+      return;
+    }
+
     try {
       final file = File(widget.book.filePath);
       if (!await file.exists()) throw Exception("File does not exist.");
@@ -261,10 +293,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             if (!mounted) return;
             setState(() { _parsingProgress = progressValue; });
           },
-          onDone: () {
+          onDone: () async {
             if (!mounted) return;
 
-            if (_chunksMetadata.isEmpty && tempTxtChunks.isEmpty) {
+            if (tempTxtChunks.isEmpty) {
               tempTxtChunks.add(PdfChunkMetadata(text: "Soubor neobsahuje žádný text.", pageNumber: 1, pdfWords: []));
             }
 
@@ -272,6 +304,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             _chunksMetadata.addAll(tempTxtChunks);
             globalCachedChunks = List.from(_chunksMetadata);
             globalCachedDocument = null;
+
+            await _saveCacheToDisk(widget.book.id, _chunksMetadata);
 
             setState(() {
               globalTotalPdfPages = 1;
@@ -306,7 +340,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             if (!mounted) return;
             setState(() { _parsingProgress = progressValue; });
           },
-          onDone: () {
+          onDone: () async {
             if (!mounted) return;
 
             if (tempPdfChunks.isEmpty) {
@@ -316,6 +350,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             _chunksMetadata.clear();
             _chunksMetadata.addAll(tempPdfChunks);
             globalCachedChunks = List.from(_chunksMetadata);
+
+            await _saveCacheToDisk(widget.book.id, _chunksMetadata);
 
             setState(() {
               _isReady = true;
@@ -420,7 +456,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
 
     setState(() {
-      _loadingStatusText = "Načítám TTS model: ${_selectedModel.name}...";
+      _loadingStatusText = "Připravuji hlasový engine...";
     });
 
     try {
@@ -428,26 +464,37 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       const esSub = 'shared-espeak-ng-data';
       final esAssetDir = 'assets/models/kokoro-en-v0_19/espeak-ng-data';
 
-      await _prepareFile('$esAssetDir/phontab', targetPath: '$esSub/phontab');
-      await _prepareFile('$esAssetDir/phondata', targetPath: '$esSub/phondata');
-      await _prepareFile('$esAssetDir/phondata-manifest', targetPath: '$esSub/phondata-manifest');
-      await _prepareFile('$esAssetDir/phonindex', targetPath: '$esSub/phonindex');
-      await _prepareFile('$esAssetDir/intonations', targetPath: '$esSub/intonations');
+      final File checkFile = File('${directory.path}/$esSub/phontab');
+      if (!await checkFile.exists()) {
+        setState(() {
+          _loadingStatusText = "Konfiguruji jazykové sady (může trvat chvíli)...";
+        });
 
-      if (_selectedModel.id == 'en_alan') {
-        await _prepareFile('assets/models/vits-piper-en_GB-alan-medium/espeak-ng-data/en_dict', targetPath: '$esSub/en_dict');
-      } else {
-        await _prepareFile('$esAssetDir/en_dict', targetPath: '$esSub/en_dict');
+        await _prepareFile('$esAssetDir/phontab', targetPath: '$esSub/phontab');
+        await _prepareFile('$esAssetDir/phondata', targetPath: '$esSub/phondata');
+        await _prepareFile('$esAssetDir/phondata-manifest', targetPath: '$esSub/phondata-manifest');
+        await _prepareFile('$esAssetDir/phonindex', targetPath: '$esSub/phonindex');
+        await _prepareFile('$esAssetDir/intonations', targetPath: '$esSub/intonations');
+
+        if (_selectedModel.id == 'en_alan') {
+          await _prepareFile('assets/models/vits-piper-en_GB-alan-medium/espeak-ng-data/en_dict', targetPath: '$esSub/en_dict');
+        } else {
+          await _prepareFile('$esAssetDir/en_dict', targetPath: '$esSub/en_dict');
+        }
+
+        await _prepareFile('assets/models/vits-piper-cs_CZ-jirka-medium/espeak-ng-data/cs_dict', targetPath: '$esSub/cs_dict');
+        await _prepareFile('$esAssetDir/lang/gmw/en', targetPath: '$esSub/lang/gmw/en');
+        await _prepareFile('$esAssetDir/lang/gmw/en-US', targetPath: '$esSub/lang/gmw/en-US');
+
+        final voicesDir = Directory('${directory.path}/$esSub/voices');
+        if (!await voicesDir.exists()) await voicesDir.create(recursive: true);
+        await File('${voicesDir.path}/cs').writeAsString("name cs\nlanguage cs\n");
+        await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en-us\n");
       }
 
-      await _prepareFile('assets/models/vits-piper-cs_CZ-jirka-medium/espeak-ng-data/cs_dict', targetPath: '$esSub/cs_dict');
-      await _prepareFile('$esAssetDir/lang/gmw/en', targetPath: '$esSub/lang/gmw/en');
-      await _prepareFile('$esAssetDir/lang/gmw/en-US', targetPath: '$esSub/lang/gmw/en-US');
-
-      final voicesDir = Directory('${directory.path}/$esSub/voices');
-      if (!await voicesDir.exists()) await voicesDir.create(recursive: true);
-      await File('${voicesDir.path}/cs').writeAsString("name cs\nlanguage cs\n");
-      await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en-us\n");
+      setState(() {
+        _loadingStatusText = "Spouštím hlas: ${_selectedModel.name}...";
+      });
 
       final espeakDataPath = '${directory.path}/$esSub'.replaceAll('\\', '/');
       sherpa.OfflineTtsModelConfig modelConfig;
@@ -481,6 +528,35 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     } catch (e) {
       debugPrint('TTS setup error: $e');
     }
+  }
+
+  Future<void> _saveCacheToDisk(String bookId, List<PdfChunkMetadata> chunks) async {
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final cacheFolder = Directory(p.join(appDir.path, 'book_cache'));
+      if (!cacheFolder.existsSync()) await cacheFolder.create(recursive: true);
+
+      final cacheFile = File(p.join(cacheFolder.path, '$bookId.cache'));
+      final List<Map<String, dynamic>> mapped = chunks.map((c) => c.toMap()).toList();
+      await cacheFile.writeAsString(jsonEncode(mapped), flush: true);
+    } catch (e) {
+      debugPrint('Error saving cache to disk: $e');
+    }
+  }
+
+  Future<List<PdfChunkMetadata>?> _loadCacheFromDisk(String bookId) async {
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final cacheFile = File(p.join(appDir.path, 'book_cache', '$bookId.cache'));
+      if (await cacheFile.exists()) {
+        final String content = await cacheFile.readAsString();
+        final List<dynamic> decoded = jsonDecode(content);
+        return decoded.map((item) => PdfChunkMetadata.fromMap(item)).toList();
+      }
+    } catch (e) {
+      debugPrint('Error loading cache from disk: $e');
+    }
+    return null;
   }
 
   void _scrollToCurrentChunk(int index) {
