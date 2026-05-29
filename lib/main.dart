@@ -11,6 +11,9 @@ import 'dashboard_screen.dart';
 late MyAudioHandler audioHandler;
 late AudioPlayer windowsPlayer;
 
+sherpa.OfflineTts? globalTts;
+String? globalCurrentModelId;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
