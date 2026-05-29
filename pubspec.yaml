@@ -1,7 +1,7 @@
-name: free_voice_reader
-description: "Free voice reader."
+name: open_voice_reader
+description: "Open Voice Reader."
 publish_to: 'none'
-version: 0.1.5+1
+version: 0.1.6+1
 
 environment:
   sdk: ^3.10.3
@@ -25,7 +25,18 @@ dependencies:
   shared_preferences: ^2.5.5
   pdfx: ^2.9.2
   url_launcher: ^6.3.2
+  flutter_launcher_icons: ^0.14.4
 
+flutter_launcher_icons:
+  android: "launcher_icon"
+  image_path: "assets/icon/app_icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icon/fg.png"
+  windows:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+    icon_size: 256
 
 dev_dependencies:
   flutter_test:
@@ -35,6 +46,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - assets/icon/fg.png
     - assets/models/vits-piper-cs_CZ-jirka-medium/cs_CZ-jirka-medium.onnx
     - assets/models/vits-piper-cs_CZ-jirka-medium/cs_CZ-jirka-medium.onnx.json
     - assets/models/vits-piper-cs_CZ-jirka-medium/tokens.txt

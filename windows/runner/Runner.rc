@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.nostalja" "\0"
-            VALUE "FileDescription", "free_voice_reader" "\0"
+            VALUE "CompanyName", "Nostalja" "\0"
+            VALUE "FileDescription", "Open Voice Reader" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "free_voice_reader" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.nostalja. All rights reserved." "\0"
-            VALUE "OriginalFilename", "free_voice_reader.exe" "\0"
-            VALUE "ProductName", "free_voice_reader" "\0"
+            VALUE "InternalName", "Open Voice Reader" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Nostalja. All rights reserved." "\0"
+            VALUE "OriginalFilename", "OpenVoiceReader.exe" "\0"
+            VALUE "ProductName", "Open Voice Reader" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

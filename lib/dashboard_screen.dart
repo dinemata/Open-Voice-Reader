@@ -355,7 +355,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF8F9FA),
       appBar: AppBar(
-        title: const Text('free_voice_reader', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: -0.5, color: Color(0xFF1F1F1F))),
+        automaticallyImplyLeading: false,
+        title: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Image.asset(
+              'assets/icon/fg.png',
+              width: 36,
+              height: 36,
+              fit: BoxFit.contain,
+            ),
+            const Text(
+              'Open Voice Reader',
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 18,
+                letterSpacing: -0.5,
+                color: Color(0xFF164063),
+              ),
+            ),
+          ],
+        ),
         backgroundColor: Colors.white,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
