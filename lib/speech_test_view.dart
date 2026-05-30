@@ -572,6 +572,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         WidgetsBinding.instance.addPostFrameCallback((_) async {
           if (!mounted) return;
 
+          final double pageHeight = _pdfViewerSize.height;
+          final double targetY = (chunk.pageNumber - 1) * pageHeight;
+
+          _transformationController.value = Matrix4.identity()
+            ..translate(0.0, -targetY * _pdfZoomFactor)
+            ..scale(_pdfZoomFactor);
+
           _pdfViewerController.jumpToPage(chunk.pageNumber);
           _updatePdfVisualHighlights();
         });
@@ -599,6 +606,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     final sf.PdfPage nativePage = _loadedDocument!.pages[targetPage - 1];
 
     final double scaleFactor = (_pdfViewerSize.width - 96.0) / nativePage.size.width;
+    final double pageHeight = _pdfViewerSize.height;
+    final double pageOffsetY = (targetPage - 1) * pageHeight;
 
     List<Rect> adjustedSentenceRects = [];
     Rect? adjustedWordRect;
@@ -607,7 +616,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       final pdfWord = currentChunk.pdfWords[i];
 
       final double baseLeft = pdfWord.bounds.left * scaleFactor;
-      final double baseTop = pdfWord.bounds.top * scaleFactor;
+      final double baseTop = (pdfWord.bounds.top * scaleFactor) + pageOffsetY;
 
       final scaledRect = Rect.fromLTWH(
         baseLeft,
@@ -631,14 +640,20 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   void _handlePdfTap(TapUpDetails d) {
     if (_isTxtFile || !globalIsOriginalLayout || _chunksMetadata.isEmpty || _pdfViewerSize == Size.zero) return;
-    final int currentPage = _pdfViewerController.pageNumber;
-    final sf.PdfPage nativePage = _loadedDocument!.pages[currentPage - 1];
-    final double scaleFactor = (_pdfViewerSize.width - 96.0) / nativePage.size.width;
 
-    final Offset pdfPointsPos = Offset(d.localPosition.dx / scaleFactor, d.localPosition.dy / scaleFactor);
+    final double scaleFactor = (_pdfViewerSize.width - 96.0) / _loadedDocument!.pages[0].size.width;
+    final double totalPositionX = d.localPosition.dx;
+    final double totalPositionY = d.localPosition.dy;
+
+    final int tappedPage = (totalPositionY / _pdfViewerSize.height).floor() + 1;
+    if (tappedPage < 1 || tappedPage > globalTotalPdfPages) return;
+
+    final double localPositionY = totalPositionY % _pdfViewerSize.height;
+    final Offset pdfPointsPos = Offset(totalPositionX / scaleFactor, localPositionY / scaleFactor);
+
     for (int chunkIdx = 0; chunkIdx < _chunksMetadata.length; chunkIdx++) {
       final chunk = _chunksMetadata[chunkIdx];
-      if (chunk.pageNumber != currentPage) continue;
+      if (chunk.pageNumber != tappedPage) continue;
       for (int wordIdx = 0; wordIdx < chunk.pdfWords.length; wordIdx++) {
         final word = chunk.pdfWords[wordIdx];
         if (word.bounds.contains(pdfPointsPos)) {
@@ -1370,29 +1385,33 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                               padding: const EdgeInsets.symmetric(horizontal: 48.0),
                                               child: Stack(
                                                 children: [
-                                                  AbsorbPointer(
-                                                    child: SfPdfViewer.file(
-                                                      File(widget.book.filePath),
-                                                      controller: _pdfViewerController,
-                                                      pageLayoutMode: PdfPageLayoutMode.continuous,
-                                                      canShowScrollHead: false,
-                                                      canShowTextSelectionMenu: false,
-                                                      enableDoubleTapZooming: false,
-                                                      enableDocumentLinkAnnotation: false,
-                                                      onDocumentLoaded: (details) {
-                                                        _pdfViewerController.zoomLevel = 1.0;
-                                                        _scrollToCurrentChunk(_currentChunkIndex);
-                                                      },
-                                                      onPageChanged: (details) {
-                                                        setState(() { globalCurrentPdfPage = details.newPageNumber; });
-                                                      },
+                                                  SizedBox(
+                                                    width: _pdfViewerSize.width - 96.0,
+                                                    height: _pdfViewerSize.height * globalTotalPdfPages,
+                                                    child: AbsorbPointer(
+                                                      child: SfPdfViewer.file(
+                                                        File(widget.book.filePath),
+                                                        controller: _pdfViewerController,
+                                                        pageLayoutMode: PdfPageLayoutMode.continuous,
+                                                        canShowScrollHead: false,
+                                                        canShowTextSelectionMenu: false,
+                                                        enableDoubleTapZooming: false,
+                                                        enableDocumentLinkAnnotation: false,
+                                                        onDocumentLoaded: (details) {
+                                                          _pdfViewerController.zoomLevel = 1.0;
+                                                          _scrollToCurrentChunk(_currentChunkIndex);
+                                                        },
+                                                        onPageChanged: (details) {
+                                                          setState(() { globalCurrentPdfPage = details.newPageNumber; });
+                                                        },
+                                                      ),
                                                     ),
                                                   ),
                                                   IgnorePointer(
                                                     child: ValueListenableBuilder<HighlightData>(
                                                       valueListenable: _highlightNotifier,
                                                       builder: (context, data, _) => CustomPaint(
-                                                        size: Size(_pdfViewerSize.width - 96.0, double.infinity),
+                                                        size: Size(_pdfViewerSize.width - 96.0, _pdfViewerSize.height * globalTotalPdfPages),
                                                         painter: PdfHighlightPainter(
                                                           sentenceRects: data.sentenceRects,
                                                           wordRect: data.wordRect,
