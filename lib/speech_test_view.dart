@@ -663,20 +663,28 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       return;
     }
 
-    setState(() {
-      _loadingStatusText = "Připravuji hlasový engine...";
-    });
+    if (mounted) {
+      setState(() {
+        _loadingStatusText = "Připravuji hlasový engine...";
+      });
+    }
 
     try {
       final directory = await getApplicationSupportDirectory();
       const esSub = 'shared-espeak-ng-data';
       final esAssetDir = 'assets/models/kokoro-en-v0_19/espeak-ng-data';
 
-      final File checkFile = File('${directory.path}/$esSub/phontab');
-      if (!await checkFile.exists()) {
-        setState(() {
-          _loadingStatusText = "Konfiguruji jazykové sady (může trvat chvíli)...";
-        });
+      final File modelDictCheck = File('${directory.path}/$esSub/${_selectedModel.id == 'en_alan' ? 'en_dict' : 'phontab'}');
+
+      if (!await modelDictCheck.exists()) {
+        if (mounted) {
+          setState(() {
+            _loadingStatusText = "Konfiguruji jazykové sady (může trvat chvíli)...";
+          });
+        }
+
+        final Directory esFolder = Directory('${directory.path}/$esSub');
+        if (!await esFolder.exists()) await esFolder.create(recursive: true);
 
         await _prepareFile('$esAssetDir/phontab', targetPath: '$esSub/phontab');
         await _prepareFile('$esAssetDir/phondata', targetPath: '$esSub/phondata');
@@ -700,9 +708,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en-us\n");
       }
 
-      setState(() {
-        _loadingStatusText = "Spouštím hlas: ${_selectedModel.name}...";
-      });
+      if (mounted) {
+        setState(() {
+          _loadingStatusText = "Spouštím hlas: ${_selectedModel.name}...";
+        });
+      }
 
       final espeakDataPath = '${directory.path}/$esSub'.replaceAll('\\', '/');
       sherpa.OfflineTtsModelConfig modelConfig;
