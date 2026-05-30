@@ -231,6 +231,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final ValueNotifier<HighlightData> _highlightNotifier = ValueNotifier<HighlightData>(HighlightData(sentenceRects: []));
   final FocusNode _keyboardFocusNode = FocusNode();
   final TransformationController _transformationController = TransformationController();
+  final ScrollController _pdfVertScrollController = ScrollController();
+  final ScrollController _pdfHorizScrollController = ScrollController();
 
   StreamSubscription? _playbackStateSubscription;
   StreamSubscription? _positionSubscription;
@@ -251,9 +253,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final SanitizerOptions _sanitizerOptions = SanitizerOptions();
 
   double _textZoomFactor = 1.0;
-  double _pdfZoomFactor = 0.7;
+  double _pdfZoomFactor = 0.5;
   final double _zoomStep = 0.1;
-  final double _minZoom = 0.1;
+  final double _minZoom = 0.2;
   final double _maxZoom = 5.0;
 
   double _playbackSpeed = 1.0;
@@ -345,6 +347,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _highlightNotifier.dispose();
     _keyboardFocusNode.dispose();
     _transformationController.dispose();
+    _pdfVertScrollController.dispose();
+    _pdfHorizScrollController.dispose();
     unawaited(_pdfRenderService.dispose());
     super.dispose();
   }
@@ -393,7 +397,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     await _pdfRenderService.open(widget.book.filePath);
 
     for (int i = 1; i <= globalTotalPdfPages; i++) {
-      final rendered = await _pdfRenderService.renderPage(i, displayWidth);
+      final renderRes = (displayWidth * 1.0).clamp(400.0, 700.0);
+      final rendered = await _pdfRenderService.renderPage(i, renderRes);
       if (!mounted) return;
       setState(() => _renderedPages.add(rendered));
     }
@@ -663,41 +668,27 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       return;
     }
 
-    if (mounted) {
-      setState(() {
-        _loadingStatusText = "Připravuji hlasový engine...";
-      });
-    }
+    setState(() {
+      _loadingStatusText = "Připravuji hlasový engine...";
+    });
 
     try {
       final directory = await getApplicationSupportDirectory();
       const esSub = 'shared-espeak-ng-data';
       final esAssetDir = 'assets/models/kokoro-en-v0_19/espeak-ng-data';
 
-      final File modelDictCheck = File('${directory.path}/$esSub/${_selectedModel.id == 'en_alan' ? 'en_dict' : 'phontab'}');
-
-      if (!await modelDictCheck.exists()) {
-        if (mounted) {
-          setState(() {
-            _loadingStatusText = "Konfiguruji jazykové sady (může trvat chvíli)...";
-          });
-        }
-
-        final Directory esFolder = Directory('${directory.path}/$esSub');
-        if (!await esFolder.exists()) await esFolder.create(recursive: true);
+      final File checkFile = File('${directory.path}/$esSub/phontab');
+      if (!await checkFile.exists()) {
+        setState(() {
+          _loadingStatusText = "Konfiguruji jazykové sady (může trvat chvíli)...";
+        });
 
         await _prepareFile('$esAssetDir/phontab', targetPath: '$esSub/phontab');
         await _prepareFile('$esAssetDir/phondata', targetPath: '$esSub/phondata');
         await _prepareFile('$esAssetDir/phondata-manifest', targetPath: '$esSub/phondata-manifest');
         await _prepareFile('$esAssetDir/phonindex', targetPath: '$esSub/phonindex');
         await _prepareFile('$esAssetDir/intonations', targetPath: '$esSub/intonations');
-
-        if (_selectedModel.id == 'en_alan') {
-          await _prepareFile('assets/models/vits-piper-en_GB-alan-medium/espeak-ng-data/en_dict', targetPath: '$esSub/en_dict');
-        } else {
-          await _prepareFile('$esAssetDir/en_dict', targetPath: '$esSub/en_dict');
-        }
-
+        await _prepareFile('$esAssetDir/en_dict', targetPath: '$esSub/en_dict');
         await _prepareFile('assets/models/vits-piper-cs_CZ-jirka-medium/espeak-ng-data/cs_dict', targetPath: '$esSub/cs_dict');
         await _prepareFile('$esAssetDir/lang/gmw/en', targetPath: '$esSub/lang/gmw/en');
         await _prepareFile('$esAssetDir/lang/gmw/en-US', targetPath: '$esSub/lang/gmw/en-US');
@@ -708,11 +699,22 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         await File('${voicesDir.path}/en-us').writeAsString("name en-us\nlanguage en-us\n");
       }
 
-      if (mounted) {
-        setState(() {
-          _loadingStatusText = "Spouštím hlas: ${_selectedModel.name}...";
-        });
+      // Always copy model-specific files so switching models always gets correct data
+      const alanAssetDir = 'assets/models/vits-piper-en_GB-alan-medium/espeak-ng-data';
+      if (_selectedModel.id == 'en_alan') {
+        await _prepareFile('$alanAssetDir/en_dict', targetPath: '$esSub/en_dict');
+        await _prepareFile('$alanAssetDir/lang/gmw/en', targetPath: '$esSub/lang/gmw/en');
+        await _prepareFile('$alanAssetDir/lang/gmw/en-GB', targetPath: '$esSub/lang/gmw/en-GB');
+        await _prepareFile('$alanAssetDir/lang/gmw/en-GB-x-rp', targetPath: '$esSub/lang/gmw/en-GB-x-rp');
+        final voicesDir = Directory('${directory.path}/$esSub/voices');
+        if (!await voicesDir.exists()) await voicesDir.create(recursive: true);
+        await File('${voicesDir.path}/en-gb').writeAsString("name en-gb\nlanguage en-gb\n");
+        await File('${voicesDir.path}/en-gb-x-rp').writeAsString("name en-gb-x-rp\nlanguage en-gb-x-rp\n");
       }
+
+      setState(() {
+        _loadingStatusText = "Spouštím hlas: ${_selectedModel.name}...";
+      });
 
       final espeakDataPath = '${directory.path}/$esSub'.replaceAll('\\', '/');
       sherpa.OfflineTtsModelConfig modelConfig;
@@ -780,23 +782,62 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   void _scrollToCurrentChunk(int index) {
     if (_chunksMetadata.isEmpty || index >= _chunksMetadata.length) return;
     if (globalIsOriginalLayout) {
-      if (_isUserScrolling || _isTxtFile) return;
+      if (_isUserScrolling || _isTxtFile || _renderedPages.isEmpty) return;
       _isProgrammaticScrolling = true;
       final chunk = _chunksMetadata[index];
 
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (!mounted) return;
-        final page = _renderedPages.firstWhere(
-              (rp) => rp.pageNumber == chunk.pageNumber,
-          orElse: () => _renderedPages.isNotEmpty ? _renderedPages.first : throw StateError('no pages'),
-        );
-        final displayHeight = (page.image.width * page.heightPt / page.widthPt);
-        final targetY = (chunk.pageNumber - 1) * (displayHeight + 8.0);
+        try {
+          if (_pdfVertScrollController.hasClients) {
+            final double viewportH = _pdfVertScrollController.position.viewportDimension;
+            final double viewportW = _pdfHorizScrollController.hasClients
+                ? _pdfHorizScrollController.position.viewportDimension
+                : viewportH;
+            final double dw = viewportW - 96.0;
 
-        _transformationController.value = Matrix4.identity()
-          ..translate(0.0, -targetY * _pdfZoomFactor)
-          ..scale(_pdfZoomFactor);
+            // Accumulate height of all pages before the target page
+            double pageTopY = 16.0;
+            for (final rp in _renderedPages) {
+              if (rp.pageNumber == chunk.pageNumber) break;
+              pageTopY += (dw * rp.heightPt / rp.widthPt) + 16.0;
+            }
 
+            // Find the vertical centre of the first word in this chunk on its page
+            double wordFracY = 0.1; // fallback: 10% down the page
+            if (chunk.pdfWords.isNotEmpty) {
+              // pdfWords bounds are in PDF points; page height is chunk's page heightPt
+              final targetRp = _renderedPages.firstWhere(
+                    (rp) => rp.pageNumber == chunk.pageNumber,
+                orElse: () => _renderedPages.first,
+              );
+              final double wordMidPt = chunk.pdfWords[0].bounds.top +
+                  chunk.pdfWords[0].bounds.height / 2;
+              wordFracY = (wordMidPt / targetRp.heightPt).clamp(0.0, 1.0);
+            }
+
+            final double pageH = dw *
+                (_renderedPages.firstWhere(
+                      (rp) => rp.pageNumber == chunk.pageNumber,
+                  orElse: () => _renderedPages.first,
+                ).heightPt /
+                    _renderedPages.firstWhere(
+                          (rp) => rp.pageNumber == chunk.pageNumber,
+                      orElse: () => _renderedPages.first,
+                    ).widthPt);
+
+            // Word's absolute Y in the unscaled column, then scale and centre in viewport
+            final double wordAbsY = pageTopY + (pageH * wordFracY);
+            final double scaledWordY = wordAbsY * _pdfZoomFactor;
+            final double scrollTarget = scaledWordY - (viewportH / 2);
+
+            _pdfVertScrollController.animateTo(
+              scrollTarget.clamp(0.0, _pdfVertScrollController.position.maxScrollExtent),
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOutCubic,
+            );
+          }
+        } catch (_) {}
         _isProgrammaticScrolling = false;
       });
     } else {
@@ -810,10 +851,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _recenterToCurrentChunk() {
-    setState(() {
-      _isUserScrolling = false;
-      _transformationController.value = Matrix4.identity();
-    });
+    setState(() { _isUserScrolling = false; });
     _scrollToCurrentChunk(_currentChunkIndex);
   }
 
@@ -965,7 +1003,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     setState(() {
       if (globalIsOriginalLayout) {
         _pdfZoomFactor = (_pdfZoomFactor + delta).clamp(_minZoom, _maxZoom);
-        _transformationController.value = Matrix4.identity()..scale(_pdfZoomFactor);
         _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
         _isMinZoomReached = _pdfZoomFactor <= _minZoom;
       } else {
@@ -1033,6 +1070,133 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
     return spans;
   }
+
+
+  Widget _buildPdfViewer() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final double availableWidth = constraints.maxWidth;
+        final double availableHeight = constraints.maxHeight;
+        final double displayWidth = availableWidth - 96.0;
+
+        if (_renderedPages.isEmpty && !_isPagesRendering) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _renderedPages.isEmpty && !_isPagesRendering) {
+              _renderAllPages(displayWidth);
+            }
+          });
+        }
+
+        const double pageGap = 16.0;
+
+        final double totalContentHeight = _renderedPages.fold(0.0, (sum, p) {
+          return sum + (displayWidth * p.heightPt / p.widthPt) + pageGap;
+        }) + 32.0;
+
+        final double scaledW = availableWidth * _pdfZoomFactor;
+        final bool needsHorizScroll = scaledW > availableWidth;
+
+        return Listener(
+          onPointerSignal: _handlePointerSignal,
+          child: Container(
+            color: const Color(0xFF3A3A3A),
+            child: RawScrollbar(
+              controller: _pdfVertScrollController,
+              thumbVisibility: true,
+              trackVisibility: true,
+              thumbColor: Colors.white38,
+              trackColor: Colors.white12,
+              radius: const Radius.circular(4),
+              thickness: 8,
+              child: RawScrollbar(
+                controller: _pdfHorizScrollController,
+                thumbVisibility: needsHorizScroll,
+                trackVisibility: needsHorizScroll,
+                thumbColor: Colors.white38,
+                trackColor: Colors.white12,
+                radius: const Radius.circular(4),
+                thickness: 8,
+                notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
+                child: SingleChildScrollView(
+                  controller: _pdfVertScrollController,
+                  physics: const ClampingScrollPhysics(),
+                  child: SingleChildScrollView(
+                    controller: _pdfHorizScrollController,
+                    scrollDirection: Axis.horizontal,
+                    physics: needsHorizScroll
+                        ? const ClampingScrollPhysics()
+                        : const NeverScrollableScrollPhysics(),
+                    child: SizedBox(
+                      width: needsHorizScroll ? scaledW : availableWidth,
+                      height: (totalContentHeight * _pdfZoomFactor).clamp(availableHeight, double.infinity),
+                      child: _renderedPages.isEmpty
+                          ? const Center(
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
+                      )
+                          : Align(
+                        alignment: Alignment.topCenter,
+                        child: Transform.scale(
+                          scale: _pdfZoomFactor,
+                          alignment: Alignment.topCenter,
+                          child: SizedBox(
+                            width: availableWidth,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                const SizedBox(height: 16),
+                                for (final renderedPage in _renderedPages)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: pageGap),
+                                    child: Container(
+                                      margin: const EdgeInsets.symmetric(horizontal: 48.0),
+                                      decoration: BoxDecoration(
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withOpacity(0.5),
+                                            blurRadius: 18,
+                                            spreadRadius: 2,
+                                            offset: const Offset(0, 4),
+                                          ),
+                                        ],
+                                      ),
+                                      child: PdfPageWidget(
+                                        page: renderedPage,
+                                        displayWidth: displayWidth,
+                                        chunks: _chunksMetadata,
+                                        currentChunkIndex: _currentChunkIndex,
+                                        currentWordIndex: _currentWordIndex,
+                                        isBusy: _isBusy,
+                                        primaryColor: Theme.of(context).colorScheme.primary,
+                                        onTap: (ci, wi) {
+                                          setState(() {
+                                            _currentChunkIndex = ci;
+                                            _currentWordIndex = wi;
+                                            _isUserScrolling = false;
+                                          });
+                                          _saveCurrentProgress();
+                                          if (_isBusy) _executeChunkReading(); else _startPdfReading();
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                const SizedBox(height: 16),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -1457,86 +1621,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                   ),
                                 ),
                                 if (!_isTxtFile)
-                                  Listener(
-                                    onPointerSignal: _handlePointerSignal,
-                                    child: LayoutBuilder(
-                                      builder: (context, constraints) {
-                                        final displayWidth = constraints.maxWidth - 96.0;
-                                        if (_renderedPages.isEmpty && !_isPagesRendering) {
-                                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                                            if (mounted && _renderedPages.isEmpty && !_isPagesRendering) {
-                                              _renderAllPages(displayWidth);
-                                            }
-                                          });
-                                        }
-
-                                        final double pageGap = 8.0;
-                                        final double totalContentHeight = _renderedPages.fold(0.0, (sum, p) {
-                                          return sum + (displayWidth * p.heightPt / p.widthPt) + pageGap;
-                                        });
-
-                                        return InteractiveViewer(
-                                          transformationController: _transformationController,
-                                          boundaryMargin: EdgeInsets.symmetric(
-                                            horizontal: displayWidth * 0.5,
-                                            vertical: constraints.maxHeight * 0.1,
-                                          ),
-                                          constrained: false,
-                                          minScale: _minZoom,
-                                          maxScale: _maxZoom,
-                                          onInteractionStart: (_) {
-                                            if (!_isUserScrolling) setState(() { _isUserScrolling = true; });
-                                          },
-                                          onInteractionUpdate: (details) {
-                                            if (details.scale != 1.0) {
-                                              setState(() {
-                                                _pdfZoomFactor = _transformationController.value.getMaxScaleOnAxis().clamp(_minZoom, _maxZoom);
-                                                _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
-                                                _isMinZoomReached = _pdfZoomFactor <= _minZoom;
-                                              });
-                                            }
-                                          },
-                                          child: SizedBox(
-                                            width: displayWidth + 96.0,
-                                            height: totalContentHeight > 0 ? totalContentHeight : constraints.maxHeight,
-                                            child: Padding(
-                                              padding: const EdgeInsets.symmetric(horizontal: 48.0),
-                                              child: _renderedPages.isEmpty
-                                                  ? Center(child: const CircularProgressIndicator(strokeWidth: 2))
-                                                  : Column(
-                                                mainAxisSize: MainAxisSize.min,
-                                                crossAxisAlignment: CrossAxisAlignment.start,
-                                                children: [
-                                                  for (final renderedPage in _renderedPages)
-                                                    Padding(
-                                                      padding: const EdgeInsets.only(bottom: 8.0),
-                                                      child: PdfPageWidget(
-                                                        page: renderedPage,
-                                                        displayWidth: displayWidth,
-                                                        chunks: _chunksMetadata,
-                                                        currentChunkIndex: _currentChunkIndex,
-                                                        currentWordIndex: _currentWordIndex,
-                                                        isBusy: _isBusy,
-                                                        primaryColor: Theme.of(context).colorScheme.primary,
-                                                        onTap: (ci, wi) {
-                                                          setState(() {
-                                                            _currentChunkIndex = ci;
-                                                            _currentWordIndex = wi;
-                                                            _isUserScrolling = false;
-                                                          });
-                                                          _saveCurrentProgress();
-                                                          if (_isBusy) _executeChunkReading(); else _startPdfReading();
-                                                        },
-                                                      ),
-                                                    ),
-                                                ],
-                                              ),
-                                            ),
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  )
+                                  _buildPdfViewer()
                                 else
                                   const SizedBox.shrink(),
                               ],
