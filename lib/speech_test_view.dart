@@ -44,8 +44,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final PdfViewerController _pdfViewerController = PdfViewerController();
   final ValueNotifier<HighlightData> _highlightNotifier = ValueNotifier<HighlightData>(HighlightData(sentenceRects: []));
   final FocusNode _keyboardFocusNode = FocusNode();
-
-  final ScrollController _pdfScrollController = ScrollController();
+  final TransformationController _transformationController = TransformationController();
 
   StreamSubscription? _playbackStateSubscription;
   StreamSubscription? _positionSubscription;
@@ -88,12 +87,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   @override
   void initState() {
     super.initState();
-
-    _pdfScrollController.addListener(() {
-      if (globalIsOriginalLayout && !_isTxtFile) {
-        _updatePdfVisualHighlights();
-      }
-    });
 
     if (globalActiveBookId == widget.book.id) {
       _currentChunkIndex = globalCurrentChunkIndex;
@@ -159,12 +152,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   @override
   void dispose() {
     _itemPositionsListener.itemPositions.removeListener(_scrollListener);
-    _pdfScrollController.dispose();
     _playbackStateSubscription?.cancel();
     _positionSubscription?.cancel();
     _highlightNotifier.dispose();
     _keyboardFocusNode.dispose();
     _pdfViewerController.dispose();
+    _transformationController.dispose();
     super.dispose();
   }
 
@@ -580,19 +573,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           if (!mounted) return;
 
           _pdfViewerController.jumpToPage(chunk.pageNumber);
-
-          if (chunk.text.trim().isNotEmpty) {
-            try {
-              final searchResult = await _pdfViewerController.searchText(
-                chunk.text,
-              );
-
-              if (searchResult.hasResult) {
-                searchResult.nextInstance();
-                searchResult.clear();
-              }
-            } catch (_) {}
-          }
+          _updatePdfVisualHighlights();
         });
 
         _isProgrammaticScrolling = false;
@@ -615,39 +596,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     final currentChunk = _chunksMetadata[_currentChunkIndex];
     final int targetPage = currentChunk.pageNumber;
-
-    if (_pdfViewerController.pageNumber != targetPage) {
-      _clearPdfHighlights();
-      return;
-    }
-
     final sf.PdfPage nativePage = _loadedDocument!.pages[targetPage - 1];
 
-    final double pageAspectRatio = nativePage.size.width / nativePage.size.height;
-    final double viewerAspectRatio = _pdfViewerSize.width / _pdfViewerSize.height;
-
-    double renderedWidth;
-    double renderedHeight;
-
-    if (pageAspectRatio > viewerAspectRatio) {
-      renderedWidth = _pdfViewerSize.width;
-      renderedHeight = renderedWidth / pageAspectRatio;
-    } else {
-      renderedHeight = _pdfViewerSize.height;
-      renderedWidth = renderedHeight * pageAspectRatio;
-    }
-
-    final double scaleFactor = (renderedWidth / nativePage.size.width) * _pdfZoomFactor;
-
-    final double offsetX = (_pdfViewerSize.width - (renderedWidth * _pdfZoomFactor)) / 2;
-    final double offsetY = (_pdfViewerSize.height - (renderedHeight * _pdfZoomFactor)) / 2;
-
-    double scrollX = 0.0;
-    double scrollY = 0.0;
-    if (_pdfScrollController.hasClients) {
-      scrollX = _pdfScrollController.position.pixels;
-      scrollY = _pdfScrollController.position.pixels;
-    }
+    final double scaleFactor = (_pdfViewerSize.width - 96.0) / nativePage.size.width;
 
     List<Rect> adjustedSentenceRects = [];
     Rect? adjustedWordRect;
@@ -655,18 +606,20 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     for (int i = 0; i < currentChunk.pdfWords.length; i++) {
       final pdfWord = currentChunk.pdfWords[i];
 
-      final double baseLeft = (pdfWord.bounds.left * scaleFactor) + (offsetX > 0 ? offsetX : 0);
-      final double baseTop = (pdfWord.bounds.top * scaleFactor) + (offsetY > 0 ? offsetY : 0);
+      final double baseLeft = pdfWord.bounds.left * scaleFactor;
+      final double baseTop = pdfWord.bounds.top * scaleFactor;
 
       final scaledRect = Rect.fromLTWH(
-        baseLeft - (_pdfViewerSize.width * _pdfZoomFactor > _pdfViewerSize.width ? scrollX : 0),
-        baseTop - (_pdfViewerSize.height * _pdfZoomFactor > _pdfViewerSize.height ? scrollY : 0),
+        baseLeft,
+        baseTop,
         pdfWord.bounds.width * scaleFactor,
         pdfWord.bounds.height * scaleFactor,
       );
 
       adjustedSentenceRects.add(scaledRect);
-      if (_isBusy && i == _currentWordIndex) adjustedWordRect = scaledRect;
+      if (_isBusy && i == _currentWordIndex) {
+        adjustedWordRect = scaledRect;
+      }
     }
 
     _highlightNotifier.value = HighlightData(sentenceRects: adjustedSentenceRects, wordRect: adjustedWordRect);
@@ -680,16 +633,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (_isTxtFile || !globalIsOriginalLayout || _chunksMetadata.isEmpty || _pdfViewerSize == Size.zero) return;
     final int currentPage = _pdfViewerController.pageNumber;
     final sf.PdfPage nativePage = _loadedDocument!.pages[currentPage - 1];
-    final double scaleFactor = (_pdfViewerSize.width / nativePage.size.width) * (_pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor);
+    final double scaleFactor = (_pdfViewerSize.width - 96.0) / nativePage.size.width;
 
-    double actualX = d.localPosition.dx;
-    double actualY = d.localPosition.dy;
-    if (_pdfZoomFactor < 1.0) {
-      actualX /= _pdfZoomFactor;
-      actualY /= _pdfZoomFactor;
-    }
-
-    final Offset pdfPointsPos = Offset(actualX / scaleFactor, actualY / scaleFactor);
+    final Offset pdfPointsPos = Offset(d.localPosition.dx / scaleFactor, d.localPosition.dy / scaleFactor);
     for (int chunkIdx = 0; chunkIdx < _chunksMetadata.length; chunkIdx++) {
       final chunk = _chunksMetadata[chunkIdx];
       if (chunk.pageNumber != currentPage) continue;
@@ -727,7 +673,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _recenterToCurrentChunk() {
-    setState(() { _isUserScrolling = false; });
+    setState(() {
+      _isUserScrolling = false;
+      _transformationController.value = Matrix4.identity();
+    });
     _scrollToCurrentChunk(_currentChunkIndex);
     if (globalIsOriginalLayout && !_isTxtFile) _updatePdfVisualHighlights();
   }
@@ -863,21 +812,16 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   void _changeZoom(double delta) {
     setState(() {
       if (globalIsOriginalLayout) {
-        _pdfZoomFactor = (_pdfZoomFactor + delta).clamp(1.0, _maxZoom);
-        _pdfViewerController.zoomLevel = _pdfZoomFactor;
+        _pdfZoomFactor = (_pdfZoomFactor + delta).clamp(_minZoom, _maxZoom);
+        _transformationController.value = Matrix4.identity()..scale(_pdfZoomFactor);
         _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
-        _isMinZoomReached = _pdfZoomFactor <= 1.0;
+        _isMinZoomReached = _pdfZoomFactor <= _minZoom;
       } else {
         _textZoomFactor = (_textZoomFactor + delta).clamp(_minZoom, _maxZoom);
         _isMaxZoomReached = _textZoomFactor >= _maxZoom;
         _isMinZoomReached = _textZoomFactor <= _minZoom;
       }
     });
-    if (!_isUserScrolling) {
-      Future.delayed(const Duration(milliseconds: 50), () { _recenterToCurrentChunk(); });
-    } else if (globalIsOriginalLayout && !_isTxtFile) {
-      _updatePdfVisualHighlights();
-    }
   }
 
   void _handlePointerSignal(PointerSignalEvent event) {
@@ -1143,7 +1087,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   children: [
                     IconButton(
                       icon: const Icon(Icons.remove_circle_outline_rounded, size: 18),
-                      onPressed: (_currentZoomFactor <= 1.0 || _isMinZoomReached) ? null : () => _changeZoom(-_zoomStep),
+                      onPressed: (_currentZoomFactor <= _minZoom || _isMinZoomReached) ? null : () => _changeZoom(-_zoomStep),
                     ),
                     Container(
                       constraints: const BoxConstraints(minWidth: 36),
@@ -1400,66 +1344,74 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                     child: LayoutBuilder(
                                       builder: (context, constraints) {
                                         _pdfViewerSize = Size(constraints.maxWidth, constraints.maxHeight);
-                                        return GestureDetector(
-                                          behavior: HitTestBehavior.opaque,
-                                          onTapUp: _handlePdfTap,
-                                          child: Stack(
-                                            children: [
-                                              SingleChildScrollView(
-                                                controller: _pdfScrollController,
-                                                scrollDirection: Axis.vertical,
-                                                child: SizedBox(
-                                                  width: _pdfViewerSize.width,
-                                                  height: _pdfViewerSize.height * _pdfZoomFactor,
-                                                  child: SfPdfViewer.file(
-                                                    File(widget.book.filePath),
-                                                    controller: _pdfViewerController,
-                                                    pageLayoutMode: PdfPageLayoutMode.single,
-                                                    canShowScrollHead: false,
-                                                    canShowTextSelectionMenu: false,
-                                                    enableDoubleTapZooming: true,
-                                                    enableDocumentLinkAnnotation: true,
-                                                    onTextSelectionChanged: null,
-                                                    onDocumentLoaded: (details) {
-                                                      _pdfViewerController.zoomLevel = _pdfZoomFactor < 1.0 ? 1.0 : _pdfZoomFactor;
-                                                      _updatePdfVisualHighlights();
-                                                    },
-                                                    onPageChanged: (details) {
-                                                      setState(() { globalCurrentPdfPage = details.newPageNumber; });
-                                                      _updatePdfVisualHighlights();
-                                                    },
-                                                    onZoomLevelChanged: (details) {
-                                                      setState(() {
-                                                        _pdfZoomFactor = details.newZoomLevel < 1.0 ? 1.0 : details.newZoomLevel;
-                                                        _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
-                                                        _isMinZoomReached = _pdfZoomFactor <= 1.0;
-                                                      });
-                                                      _updatePdfVisualHighlights();
-                                                    },
-                                                  ),
-                                                ),
-                                              ),
-                                              IgnorePointer(
-                                                child: ValueListenableBuilder<HighlightData>(
-                                                  valueListenable: _highlightNotifier,
-                                                  builder: (context, data, _) => CustomPaint(
-                                                    size: Size.infinite,
-                                                    painter: PdfHighlightPainter(
-                                                      sentenceRects: data.sentenceRects,
-                                                      wordRect: data.wordRect,
-                                                      primaryColor: _isBusy
-                                                          ? Theme.of(context).colorScheme.primary
-                                                          : Theme.of(context).colorScheme.primary.withOpacity(0.5),
+                                        return InteractiveViewer(
+                                          transformationController: _transformationController,
+                                          boundaryMargin: const EdgeInsets.all(400),
+                                          minScale: _minZoom,
+                                          maxScale: _maxZoom,
+                                          onInteractionStart: (_) {
+                                            if (!_isUserScrolling) {
+                                              setState(() { _isUserScrolling = true; });
+                                            }
+                                          },
+                                          onInteractionUpdate: (details) {
+                                            if (details.scale != 1.0) {
+                                              setState(() {
+                                                _pdfZoomFactor = _transformationController.value.getMaxScaleOnAxis().clamp(_minZoom, _maxZoom);
+                                                _isMaxZoomReached = _pdfZoomFactor >= _maxZoom;
+                                                _isMinZoomReached = _pdfZoomFactor <= _minZoom;
+                                              });
+                                            }
+                                          },
+                                          child: GestureDetector(
+                                            behavior: HitTestBehavior.opaque,
+                                            onTapUp: _handlePdfTap,
+                                            child: Padding(
+                                              padding: const EdgeInsets.symmetric(horizontal: 48.0),
+                                              child: Stack(
+                                                children: [
+                                                  AbsorbPointer(
+                                                    child: SfPdfViewer.file(
+                                                      File(widget.book.filePath),
+                                                      controller: _pdfViewerController,
+                                                      pageLayoutMode: PdfPageLayoutMode.continuous,
+                                                      canShowScrollHead: false,
+                                                      canShowTextSelectionMenu: false,
+                                                      enableDoubleTapZooming: false,
+                                                      enableDocumentLinkAnnotation: false,
+                                                      onDocumentLoaded: (details) {
+                                                        _pdfViewerController.zoomLevel = 1.0;
+                                                        _scrollToCurrentChunk(_currentChunkIndex);
+                                                      },
+                                                      onPageChanged: (details) {
+                                                        setState(() { globalCurrentPdfPage = details.newPageNumber; });
+                                                      },
                                                     ),
                                                   ),
-                                                ),
+                                                  IgnorePointer(
+                                                    child: ValueListenableBuilder<HighlightData>(
+                                                      valueListenable: _highlightNotifier,
+                                                      builder: (context, data, _) => CustomPaint(
+                                                        size: Size(_pdfViewerSize.width - 96.0, double.infinity),
+                                                        painter: PdfHighlightPainter(
+                                                          sentenceRects: data.sentenceRects,
+                                                          wordRect: data.wordRect,
+                                                          primaryColor: _isBusy
+                                                              ? Theme.of(context).colorScheme.primary
+                                                              : Theme.of(context).colorScheme.primary.withOpacity(0.5),
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
-                                            ],
+                                            ),
                                           ),
                                         );
                                       },
                                     ),
-                                  ) else
+                                  )
+                                else
                                   const SizedBox.shrink(),
                               ],
                             ),
