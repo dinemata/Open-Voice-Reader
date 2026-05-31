@@ -23,6 +23,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List<BookModel> _books = [];
   bool _isLoadingHistory = true;
   bool _isImporting = false;
+  String _importStatus = '';
+  double _importProgress = 0.0;
 
   double _playbackSpeed = 1.0;
   double _volume = 1.0;
@@ -86,59 +88,57 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['pdf', 'txt']);
       if (result == null || result.files.single.path == null) return;
 
-      setState(() => _isImporting = true);
-
+      setState(() { _isImporting = true; _importStatus = 'Čtu soubor...'; _importProgress = 0.05; });
       final filePath = result.files.single.path!;
       final file = File(filePath);
-
       int wordCount = 0;
       int chunkCount = 0;
 
       if (filePath.toLowerCase().endsWith('.txt')) {
+        setState(() { _importStatus = 'Analyzuji text...'; _importProgress = 0.2; });
         final content = await file.readAsString();
-        final List<String> sentences = content.split(RegExp(r'(?<=[.!?])\s+'));
+        final sentences = content.split(RegExp(r'(?<=[.!?])\s+'));
         for (var sentence in sentences) {
           if (sentence.trim().isNotEmpty) {
             wordCount += sentence.trim().split(RegExp(r'\s+')).length;
             chunkCount++;
           }
         }
+        setState(() { _importProgress = 0.7; });
       } else {
+        setState(() { _importStatus = 'Čtu stránky PDF...'; _importProgress = 0.15; });
         final bytes = await file.readAsBytes();
+        setState(() { _importStatus = 'Analyzuji strukturu...'; _importProgress = 0.3; });
         final document = sf.PdfDocument(inputBytes: bytes);
         final extractor = sf.PdfTextExtractor(document);
-
-        for (int i = 0; i < document.pages.count; i++) {
+        final int pageCount = document.pages.count;
+        for (int i = 0; i < pageCount; i++) {
           final lines = extractor.extractTextLines(startPageIndex: i, endPageIndex: i);
-          for (var line in lines) {
-            wordCount += line.wordCollection.length;
-            chunkCount++;
+          for (var line in lines) { wordCount += line.wordCollection.length; chunkCount++; }
+          if (i % 5 == 0 || i == pageCount - 1) {
+            final prog = 0.3 + 0.45 * ((i + 1) / pageCount);
+            setState(() { _importProgress = prog; _importStatus = 'Stránka ${i + 1} / $pageCount...'; });
+            await Future.delayed(Duration.zero);
           }
         }
         document.dispose();
       }
 
+      setState(() { _importStatus = 'Generuji náhled...'; _importProgress = 0.85; });
       final bookId = DateTime.now().millisecondsSinceEpoch.toString();
       final String? coverPath = await _generatePdfCover(filePath, bookId);
 
+      setState(() { _importStatus = 'Ukládám...'; _importProgress = 0.95; });
       final newBook = BookModel(
-        id: bookId,
-        filePath: filePath,
-        title: p.basename(filePath),
-        totalChunks: chunkCount > 0 ? chunkCount : 1,
-        totalWords: wordCount,
-        coverPath: coverPath,
-        lastModelId: null,
+        id: bookId, filePath: filePath, title: p.basename(filePath),
+        totalChunks: chunkCount > 0 ? chunkCount : 1, totalWords: wordCount,
+        coverPath: coverPath, lastModelId: null,
       );
-
-      setState(() {
-        _books.insert(0, newBook);
-        _isImporting = false;
-      });
+      setState(() { _books.insert(0, newBook); _isImporting = false; _importStatus = ''; _importProgress = 0.0; });
       await _saveHistory();
       _openBook(newBook);
     } catch (e) {
-      setState(() => _isImporting = false);
+      setState(() { _isImporting = false; _importStatus = ''; _importProgress = 0.0; });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Import error: $e')));
     }
   }
@@ -162,8 +162,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
       MaterialPageRoute(
         builder: (context) => SpeechTestView(book: book),
       ),
-    ).then((_) {
-      setState(() {});
+    ).then((_) async {
+      if (!Platform.isAndroid && !Platform.isIOS) {
+        try { await windowsPlayer.stop(); } catch (_) {}
+      }
+      if (mounted) setState(() {});
     });
   }
 
@@ -260,21 +263,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _deleteBook(BookModel book) async {
+    if (globalActiveBookId == book.id && globalIsAudioBusy) {
+      globalIsAudioBusy = false;
+      globalActiveBookId = null;
+      if (Platform.isAndroid || Platform.isIOS) {
+        await audioHandler.stop();
+      } else {
+        await windowsPlayer.stop();
+      }
+    }
     if (book.coverPath != null) {
       final f = File(book.coverPath!);
       if (f.existsSync()) f.deleteSync();
     }
-
     try {
       final appDir = await getApplicationSupportDirectory();
       final cacheFile = File(p.join(appDir.path, 'book_cache', '${book.id}.cache'));
-      if (cacheFile.existsSync()) {
-        cacheFile.deleteSync();
-      }
+      if (cacheFile.existsSync()) cacheFile.deleteSync();
     } catch (e) {
       debugPrint('Error deleting disk cache file: $e');
     }
-
     setState(() { _books.removeWhere((b) => b.id == book.id); });
     await _saveHistory();
   }
@@ -349,18 +357,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
     String statusText = '';
 
     if (globalActiveBookId != null) {
-      activeBook = _books.firstWhere((b) => b.id == globalActiveBookId, orElse: () => BookModel(id: '', filePath: '', title: 'Unknown document', totalChunks: 1, totalWords: 0));
-      isCompleted = globalCurrentChunkIndex >= activeBook.totalChunks;
-
-      if (isCompleted) {
-        statusText = 'Completed';
-      } else {
-        final bool isTxt = activeBook.filePath.toLowerCase().endsWith('.txt');
-        if (globalIsOriginalLayout && !isTxt) {
-          statusText = 'Page: $globalCurrentPdfPage / $globalTotalPdfPages';
+      final foundBooks = _books.where((b) => b.id == globalActiveBookId).toList();
+      if (foundBooks.isNotEmpty && File(foundBooks.first.filePath).existsSync()) {
+        activeBook = foundBooks.first;
+        isCompleted = globalCurrentChunkIndex >= activeBook.totalChunks;
+        if (isCompleted) {
+          statusText = 'Completed';
         } else {
-          statusText = 'Block: ${globalCurrentChunkIndex + 1} / ${activeBook.totalChunks}';
+          final bool isTxt = activeBook.filePath.toLowerCase().endsWith('.txt');
+          if (globalIsOriginalLayout && !isTxt) {
+            statusText = 'Page: $globalCurrentPdfPage / $globalTotalPdfPages';
+          } else {
+            statusText = 'Block: ${globalCurrentChunkIndex + 1} / ${activeBook.totalChunks}';
+          }
         }
+      } else {
+        globalActiveBookId = null;
+        globalIsAudioBusy = false;
       }
     }
 
@@ -393,201 +406,220 @@ class _DashboardScreenState extends State<DashboardScreen> {
         elevation: 0,
         shape: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1)),
       ),
-      body: IgnorePointer(
-        ignoring: _isImporting,
-        child: Opacity(
-          opacity: _isImporting ? 0.5 : 1.0,
-          child: CustomScrollView(
-            slivers: [
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Material(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        child: InkWell(
-                          onTap: _isImporting ? null : _importNewBook,
+      body: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Material(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    child: InkWell(
+                      onTap: _isImporting ? null : _importNewBook,
+                      borderRadius: BorderRadius.circular(16),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        width: double.infinity,
+                        height: _isImporting ? 120 : 110,
+                        decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(16),
-                          child: Container(
-                            width: double.infinity, height: 110,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(color: Colors.blue.shade200, width: 1.5),
-                            ),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(color: Colors.blue.shade50, shape: BoxShape.circle),
-                                  child: _isImporting
-                                      ? const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 2.5))
-                                      : const Icon(Icons.add_rounded, size: 28, color: Color(0xFF1A73E8)),
+                          border: Border.all(color: Colors.blue.shade200, width: 1.5),
+                        ),
+                        child: _isImporting
+                            ? Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Row(children: [
+                                const SizedBox(width: 18, height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF1A73E8))),
+                                const SizedBox(width: 10),
+                                Expanded(child: Text(_importStatus,
+                                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12, color: Color(0xFF1A73E8)))),
+                                Text('${(_importProgress * 100).toStringAsFixed(0)}%',
+                                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF5F6368))),
+                              ]),
+                              const SizedBox(height: 8),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(3),
+                                child: LinearProgressIndicator(
+                                  value: _importProgress, minHeight: 4,
+                                  backgroundColor: Colors.blue.shade50,
+                                  color: const Color(0xFF1A73E8),
                                 ),
-                                const SizedBox(height: 10),
-                                Text(
-                                  _isImporting ? 'Načítání a analýza dokumentu...' : 'Otevřít nový PDF nebo TXT dokument',
-                                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1A73E8)),
-                                ),
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
+                        )
+                            : Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(color: Colors.blue.shade50, shape: BoxShape.circle),
+                              child: const Icon(Icons.add_rounded, size: 28, color: Color(0xFF1A73E8)),
+                            ),
+                            const SizedBox(height: 10),
+                            const Text('Otevřít nový PDF nebo TXT dokument',
+                                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1A73E8))),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 36),
-                      const Text('Nedávné dokumenty', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: Color(0xFF1F1F1F))),
-                      const SizedBox(height: 16),
-                    ],
-                  ),
-                ),
-              ),
-              if (_isLoadingHistory)
-                const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))
-              else if (_books.isEmpty)
-                const SliverFillRemaining(child: Center(child: Text('Žádné dokumenty k zobrazení.', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w500))))
-              else
-                SliverPadding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  sliver: SliverGrid(
-                    gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                      maxCrossAxisExtent: 280, mainAxisSpacing: 20, crossAxisSpacing: 20, childAspectRatio: 0.85,
                     ),
-                    delegate: SliverChildBuilderDelegate(
-                          (context, index) {
-                        final book = _books[index];
-                        final double progress = book.totalChunks > 0 ? book.lastChunkIndex / book.totalChunks : 0.0;
-                        final bool hasCover = book.coverPath != null && File(book.coverPath!).existsSync();
-                        final bool isTxt = book.filePath.toLowerCase().endsWith('.txt');
+                  ),
+                  const SizedBox(height: 36),
+                  const Text('Nedávné dokumenty', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: Color(0xFF1F1F1F))),
+                  const SizedBox(height: 16),
+                ],
+              ),
+            ),
+          ),
+          if (_isLoadingHistory)
+            const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))
+          else if (_books.isEmpty)
+            const SliverFillRemaining(child: Center(child: Text('Žádné dokumenty k zobrazení.', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.w500))))
+          else
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                  maxCrossAxisExtent: 280, mainAxisSpacing: 20, crossAxisSpacing: 20, childAspectRatio: 0.85,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                      (context, index) {
+                    final book = _books[index];
+                    final double progress = book.totalChunks > 0 ? book.lastChunkIndex / book.totalChunks : 0.0;
+                    final bool hasCover = book.coverPath != null && File(book.coverPath!).existsSync();
+                    final bool isTxt = book.filePath.toLowerCase().endsWith('.txt');
 
-                        return FutureBuilder<bool>(
-                          future: File(book.filePath).exists(),
-                          builder: (context, snapshot) {
-                            final bool exists = snapshot.data ?? true;
-                            return Container(
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
-                                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 2))],
-                              ),
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(16),
-                                child: InkWell(
-                                  onTap: () => _openBook(book),
-                                  borderRadius: BorderRadius.circular(16),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Expanded(
-                                        child: Stack(
-                                          children: [
-                                            Positioned.fill(
-                                              child: hasCover
-                                                  ? Image.file(File(book.coverPath!), fit: BoxFit.cover, alignment: Alignment.topCenter)
-                                                  : Container(
-                                                color: isTxt ? const Color(0xFFE8F0FE) : Colors.grey.shade100,
-                                                child: Icon(
-                                                  isTxt ? Icons.description_rounded : Icons.picture_as_pdf_rounded,
-                                                  color: exists ? (isTxt ? Colors.blue.shade600 : Colors.red.shade300) : Colors.grey.shade400,
-                                                  size: 48,
-                                                ),
-                                              ),
+                    return FutureBuilder<bool>(
+                      future: File(book.filePath).exists(),
+                      builder: (context, snapshot) {
+                        final bool exists = snapshot.data ?? true;
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
+                            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 2))],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: InkWell(
+                              onTap: () => _openBook(book),
+                              borderRadius: BorderRadius.circular(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(
+                                    child: Stack(
+                                      children: [
+                                        Positioned.fill(
+                                          child: hasCover
+                                              ? Image.file(File(book.coverPath!), fit: BoxFit.cover, alignment: Alignment.topCenter)
+                                              : Container(
+                                            color: isTxt ? const Color(0xFFE8F0FE) : Colors.grey.shade100,
+                                            child: Icon(
+                                              isTxt ? Icons.description_rounded : Icons.picture_as_pdf_rounded,
+                                              color: exists ? (isTxt ? Colors.blue.shade600 : Colors.red.shade300) : Colors.grey.shade400,
+                                              size: 48,
                                             ),
-                                            Positioned(
-                                              top: 8, left: 8,
-                                              child: Container(
-                                                padding: const EdgeInsets.all(6),
-                                                decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(8)),
-                                                child: Icon(
-                                                  isTxt ? Icons.description_rounded : Icons.picture_as_pdf_rounded,
-                                                  color: exists ? (isTxt ? Colors.blue.shade700 : Colors.red.shade600) : Colors.grey,
-                                                  size: 16,
-                                                ),
-                                              ),
-                                            ),
-                                            if (!exists)
-                                              Positioned(
-                                                top: 8, left: 40,
-                                                child: Container(
-                                                  padding: const EdgeInsets.all(4),
-                                                  decoration: BoxDecoration(color: Colors.amber.shade50, shape: BoxShape.circle),
-                                                  child: Icon(Icons.warning_amber_rounded, color: Colors.amber.shade900, size: 16),
-                                                ),
-                                              ),
-                                            Positioned(
-                                              top: 8, right: 8,
-                                              child: Container(
-                                                decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), shape: BoxShape.circle),
-                                                child: PopupMenuButton<String>(
-                                                  padding: EdgeInsets.zero,
-                                                  constraints: const BoxConstraints(),
-                                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                                  icon: const Icon(Icons.more_vert_rounded, size: 18, color: Color(0xFF5F6368)),
-                                                  onSelected: (value) {
-                                                    if (value == 'open') _openBook(book);
-                                                    if (value == 'rename') _showRenameDialog(book);
-                                                    if (value == 'location') _openFileLocation(book);
-                                                    if (value == 'relink') _showRelinkDialog(book);
-                                                    if (value == 'delete') _deleteBook(book);
-                                                  },
-                                                  itemBuilder: (context) => [
-                                                    const PopupMenuItem(value: 'open', child: Row(children: [Icon(Icons.book_outlined, size: 18), SizedBox(width: 10), Text('Otevřít')])),
-                                                    const PopupMenuItem(value: 'rename', child: Row(children: [Icon(Icons.edit_outlined, size: 18), SizedBox(width: 10), Text('Přejmenovat')])),
-                                                    const PopupMenuItem(value: 'location', child: Row(children: [Icon(Icons.folder_open_outlined, size: 18), SizedBox(width: 10), Text('Zobrazit umístění')])),
-                                                    if (!exists) const PopupMenuItem(value: 'relink', child: Row(children: [Icon(Icons.link_outlined, size: 18), SizedBox(width: 10), Text('Dohledat')])),
-                                                    PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline_rounded, size: 18, color: Colors.red.shade600), SizedBox(width: 10), Text('Smazat', style: TextStyle(color: Colors.red.shade600, fontWeight: FontWeight.w600))])),
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                          ],
+                                          ),
                                         ),
-                                      ),
-                                      Container(
-                                        color: Colors.white,
-                                        padding: const EdgeInsets.all(12.0),
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: exists ? const Color(0xFF1F1F1F) : Colors.grey.shade600)),
-                                            const SizedBox(height: 8),
-                                            Row(
-                                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                              children: [
-                                                Expanded(
-                                                  child: ClipRRect(
-                                                    borderRadius: BorderRadius.circular(4),
-                                                    child: LinearProgressIndicator(
-                                                      value: progress.clamp(0.0, 1.0),
-                                                      backgroundColor: Colors.grey.shade100, color: const Color(0xFF1A73E8),
-                                                      minHeight: 5,
-                                                    ),
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 10),
-                                                Text('${(progress * 100).toStringAsFixed(0)}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Color(0xFF757575))),
+                                        Positioned(
+                                          top: 8, left: 8,
+                                          child: Container(
+                                            padding: const EdgeInsets.all(6),
+                                            decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(8)),
+                                            child: Icon(
+                                              isTxt ? Icons.description_rounded : Icons.picture_as_pdf_rounded,
+                                              color: exists ? (isTxt ? Colors.blue.shade700 : Colors.red.shade600) : Colors.grey,
+                                              size: 16,
+                                            ),
+                                          ),
+                                        ),
+                                        if (!exists)
+                                          Positioned(
+                                            top: 8, left: 40,
+                                            child: Container(
+                                              padding: const EdgeInsets.all(4),
+                                              decoration: BoxDecoration(color: Colors.amber.shade50, shape: BoxShape.circle),
+                                              child: Icon(Icons.warning_amber_rounded, color: Colors.amber.shade900, size: 16),
+                                            ),
+                                          ),
+                                        Positioned(
+                                          top: 8, right: 8,
+                                          child: Container(
+                                            decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), shape: BoxShape.circle),
+                                            child: PopupMenuButton<String>(
+                                              padding: EdgeInsets.zero,
+                                              constraints: const BoxConstraints(),
+                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                              icon: const Icon(Icons.more_vert_rounded, size: 18, color: Color(0xFF5F6368)),
+                                              onSelected: (value) {
+                                                if (value == 'open') _openBook(book);
+                                                if (value == 'rename') _showRenameDialog(book);
+                                                if (value == 'location') _openFileLocation(book);
+                                                if (value == 'relink') _showRelinkDialog(book);
+                                                if (value == 'delete') _deleteBook(book);
+                                              },
+                                              itemBuilder: (context) => [
+                                                const PopupMenuItem(value: 'open', child: Row(children: [Icon(Icons.book_outlined, size: 18), SizedBox(width: 10), Text('Otevřít')])),
+                                                const PopupMenuItem(value: 'rename', child: Row(children: [Icon(Icons.edit_outlined, size: 18), SizedBox(width: 10), Text('Přejmenovat')])),
+                                                const PopupMenuItem(value: 'location', child: Row(children: [Icon(Icons.folder_open_outlined, size: 18), SizedBox(width: 10), Text('Zobrazit umístění')])),
+                                                if (!exists) const PopupMenuItem(value: 'relink', child: Row(children: [Icon(Icons.link_outlined, size: 18), SizedBox(width: 10), Text('Dohledat')])),
+                                                PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline_rounded, size: 18, color: Colors.red.shade600), SizedBox(width: 10), Text('Smazat', style: TextStyle(color: Colors.red.shade600, fontWeight: FontWeight.w600))])),
                                               ],
                                             ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Container(
+                                    color: Colors.white,
+                                    padding: const EdgeInsets.all(12.0),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: exists ? const Color(0xFF1F1F1F) : Colors.grey.shade600)),
+                                        const SizedBox(height: 8),
+                                        Row(
+                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            Expanded(
+                                              child: ClipRRect(
+                                                borderRadius: BorderRadius.circular(4),
+                                                child: LinearProgressIndicator(
+                                                  value: progress.clamp(0.0, 1.0),
+                                                  backgroundColor: Colors.grey.shade100, color: const Color(0xFF1A73E8),
+                                                  minHeight: 5,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 10),
+                                            Text('${(progress * 100).toStringAsFixed(0)}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Color(0xFF757575))),
                                           ],
                                         ),
-                                      ),
-                                    ],
+                                      ],
+                                    ),
                                   ),
-                                ),
+                                ],
                               ),
-                            );
-                          },
+                            ),
+                          ),
                         );
                       },
-                      childCount: _books.length,
-                    ),
-                  ),
-                )],
-          ),
-        ),
+                    );
+                  },
+                  childCount: _books.length,
+                ),
+              ),
+            )],
       ),
       bottomNavigationBar: activeBook == null
           ? null

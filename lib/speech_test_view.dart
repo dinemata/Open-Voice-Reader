@@ -271,6 +271,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final Map<int, String> _pregeneratedAudioCache = {};
 
   final SanitizerOptions _sanitizerOptions = SanitizerOptions();
+  bool _skipPageNumbers = false;
 
   double _textZoomFactor = 1.0;
   double _pdfZoomFactor = 0.5;
@@ -326,6 +327,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     _itemPositionsListener.itemPositions.addListener(_scrollListener);
     _setupAudioListeners();
+    _pdfVertScrollController.addListener(_onPdfManualScroll);
+    _pdfHorizScrollController.addListener(_onPdfManualScroll);
+  }
+
+  void _onPdfManualScroll() {
+    if (_isProgrammaticScrolling) return;
+    if (!_isUserScrolling) setState(() { _isUserScrolling = true; });
   }
 
   void _setupAudioListeners() {
@@ -957,6 +965,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     try {
       final rawText = _chunksMetadata[_currentChunkIndex].text;
+      if (_skipPageNumbers && RegExp(r'^\d{1,4}$').hasMatch(rawText.trim())) {
+        _skipToNextFailedChunk();
+        return;
+      }
       _scrollToCurrentChunk(_currentChunkIndex);
 
       if (globalIsOriginalLayout && !_isTxtFile) {
@@ -1023,15 +1035,32 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (!_isBusy) return;
     final player = (Platform.isAndroid || Platform.isIOS) ? audioHandler.player : windowsPlayer;
     final currentPos = player.position;
+    final duration = player.duration ?? Duration.zero;
     final targetPos = currentPos + Duration(seconds: seconds);
-    final duration = player.duration;
-    if (duration != null) {
-      if (targetPos < Duration.zero) {
-        player.seek(Duration.zero);
-      } else if (targetPos > duration) {
-        if (_stopAtEndOfBlock) _stopAudioAndPop(); else _handleTrackComplete();
-      } else {
+    if (seconds > 0) {
+      if (targetPos <= duration) {
         player.seek(targetPos);
+      } else {
+        if (_stopAtEndOfBlock) { _stopAudioAndPop(); return; }
+        if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
+        _currentWordIndex = 0;
+        _currentChunkIndex++;
+        _saveCurrentProgress();
+        _executeChunkReading();
+      }
+    } else {
+      if (targetPos >= Duration.zero) {
+        player.seek(targetPos);
+      } else {
+        if (_currentChunkIndex > 0) {
+          if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
+          _currentWordIndex = 0;
+          _currentChunkIndex--;
+          _saveCurrentProgress();
+          _executeChunkReading();
+        } else {
+          player.seek(Duration.zero);
+        }
       }
     }
   }
@@ -1201,31 +1230,62 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     return result;
   }
 
+  // Orange highlight only. Jump happens when play is pressed.
   void _previewThenJump(int chunkIndex) {
     _pendingJumpTimer?.cancel();
     setState(() {
       _pendingJumpIndex = chunkIndex;
+      _selectedChunkIndex = chunkIndex;
       _tocOpen = false;
     });
-    _pendingJumpTimer = Timer(const Duration(milliseconds: 500), () {
-      if (!mounted) return;
-      setState(() {
-        _selectedChunkIndex = chunkIndex;
-        _pendingJumpIndex = null;
-      });
-      if (globalIsOriginalLayout && !_isTxtFile) {
-        _isUserScrolling = false;
-        _scrollToCurrentChunk(chunkIndex);
-      } else {
-        if (_itemScrollController.isAttached) {
-          _isProgrammaticScrolling = true;
-          _itemScrollController
-              .scrollTo(index: chunkIndex, alignment: 0.2,
-              duration: const Duration(milliseconds: 350),
-              curve: Curves.easeInOutCubic)
-              .then((_) => _isProgrammaticScrolling = false);
-        }
+    if (!globalIsOriginalLayout || _isTxtFile) {
+      if (_itemScrollController.isAttached) {
+        _isProgrammaticScrolling = true;
+        _itemScrollController
+            .scrollTo(index: chunkIndex, alignment: 0.2,
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeInOutCubic)
+            .then((_) => _isProgrammaticScrolling = false);
       }
+    } else {
+      _scrollToPending(chunkIndex);
+    }
+  }
+
+  void _scrollToPending(int chunkIndex) {
+    if (_renderedPages.isEmpty || chunkIndex >= _chunksMetadata.length) return;
+    final chunk = _chunksMetadata[chunkIndex];
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_pdfVertScrollController.hasClients) return;
+      try {
+        final double viewportH = _pdfVertScrollController.position.viewportDimension;
+        final double viewportW = _pdfHorizScrollController.hasClients
+            ? _pdfHorizScrollController.position.viewportDimension
+            : viewportH;
+        final double dw = viewportW - 96.0;
+        double pageTopY = 16.0;
+        for (final rp in _renderedPages) {
+          if (rp.pageNumber == chunk.pageNumber) break;
+          pageTopY += (dw * rp.heightPt / rp.widthPt) + 16.0;
+        }
+        double wordFracY = 0.1;
+        if (chunk.pdfWords.isNotEmpty) {
+          final targetRp = _renderedPages.firstWhere(
+                  (rp) => rp.pageNumber == chunk.pageNumber, orElse: () => _renderedPages.first);
+          wordFracY = ((chunk.pdfWords[0].bounds.top + chunk.pdfWords[0].bounds.height / 2)
+              / targetRp.heightPt).clamp(0.0, 1.0);
+        }
+        final targetRp = _renderedPages.firstWhere(
+                (rp) => rp.pageNumber == chunk.pageNumber, orElse: () => _renderedPages.first);
+        final double pageH = dw * targetRp.heightPt / targetRp.widthPt;
+        final double wordAbsY = pageTopY + (pageH * wordFracY);
+        final double scrollTarget = (wordAbsY * _pdfZoomFactor) - (viewportH / 2);
+        _pdfVertScrollController.animateTo(
+          scrollTarget.clamp(0.0, _pdfVertScrollController.position.maxScrollExtent),
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOutCubic,
+        );
+      } catch (_) {}
     });
   }
 
@@ -1234,12 +1294,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (entries.isEmpty) return const SizedBox.shrink();
     return Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.end,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (_tocOpen)
           Container(
             constraints: const BoxConstraints(maxWidth: 280, maxHeight: 320),
-            margin: const EdgeInsets.only(bottom: 8),
+            margin: const EdgeInsets.only(top: 8),
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(12),
@@ -1298,7 +1358,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           backgroundColor: _tocOpen ? Colors.orange.shade700 : Colors.white,
           foregroundColor: _tocOpen ? Colors.white : Colors.black87,
           elevation: 3,
-          child: const Icon(Icons.list_rounded),
+          child: const Icon(Icons.format_list_bulleted_rounded),
         ),
       ],
     );
@@ -1402,13 +1462,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                         isBusy: _isBusy,
                                         primaryColor: Theme.of(context).colorScheme.primary,
                                         onTap: (ci, wi) {
-                                          setState(() {
-                                            _currentChunkIndex = ci;
-                                            _currentWordIndex = wi;
-                                            _isUserScrolling = false;
-                                          });
-                                          _saveCurrentProgress();
-                                          if (_isBusy) _executeChunkReading(); else _startPdfReading();
+                                          _previewThenJump(ci);
                                         },
                                       ),
                                     ),
@@ -1630,15 +1684,17 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   constraints: const BoxConstraints(minWidth: 180, maxWidth: 220),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                   splashRadius: 20,
-                  tooltip: 'Parametry parsování',
+                  tooltip: 'Parametry',
                   onSelected: (value) async {
+                    if (value == 'pages') {
+                      setState(() { _skipPageNumbers = !_skipPageNumbers; });
+                      return;
+                    }
                     setState(() {
                       if (value == 'parentheses') {
                         _sanitizerOptions.readParentheses = !_sanitizerOptions.readParentheses;
                       } else if (value == 'links') {
                         _sanitizerOptions.readLinks = !_sanitizerOptions.readLinks;
-                      } else if (value == 'pages') {
-                        _sanitizerOptions.readPageNumbers = !_sanitizerOptions.readPageNumbers;
                       }
                     });
                     if (!_isParsingPdf && _isReady) {
@@ -1660,7 +1716,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          const Text('Číst závorky', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                          const Text('Číst závorky (přegenerovat)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
                         ],
                       ),
                     ),
@@ -1678,7 +1734,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          const Text('Číst odkazy', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                          const Text('Číst odkazy (přegenerovat)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
                         ],
                       ),
                     ),
@@ -1690,13 +1746,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                           SizedBox(
                             width: 24, height: 24,
                             child: Checkbox(
-                              value: _sanitizerOptions.readPageNumbers,
+                              value: _skipPageNumbers,
                               activeColor: const Color(0xFF1A73E8),
                               onChanged: (bool? val) { Navigator.pop(context, 'pages'); },
                             ),
                           ),
                           const SizedBox(width: 8),
-                          const Text('Číst čísla stran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                          const Text('Přeskočit čísla stran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
                         ],
                       ),
                     ),
@@ -1902,8 +1958,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         ),
                         if (!_isFullscreen && _tocEntries.isNotEmpty)
                           Positioned(
-                            bottom: _isUserScrolling ? 66 : 16,
-                            right: 16,
+                            top: 12,
+                            left: 12,
                             child: _buildTocButton(context),
                           ),
                         if (_isUserScrolling && !_isFullscreen)
