@@ -367,6 +367,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   @override
   void dispose() {
+    if (Platform.isWindows) {
+      windowsPlayer.stop();
+    }
+
     _itemPositionsListener.itemPositions.removeListener(_scrollListener);
     _playbackStateSubscription?.cancel();
     _positionSubscription?.cancel();
@@ -377,6 +381,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _pdfHorizScrollController.dispose();
     _pendingJumpTimer?.cancel();
     unawaited(_pdfRenderService.dispose());
+
     super.dispose();
   }
 
@@ -923,10 +928,33 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _executeChunkReading() async {
-    if (_currentChunkIndex >= _chunksMetadata.length || !_isBusy) {
-      if (mounted) setState(() { _isBusy = false; });
+    if (!await File(widget.book.filePath).exists()) {
+      _stopPdfReading();
+      globalIsAudioBusy = false;
+      globalActiveBookId = null;
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Document was deleted, moved or renamed. Reading stopped.',
+            ),
+          ),
+        );
+      }
+
       return;
     }
+
+    if (_currentChunkIndex >= _chunksMetadata.length || !_isBusy) {
+      if (mounted) {
+        setState(() {
+          _isBusy = false;
+        });
+      }
+      return;
+    }
+
     try {
       final rawText = _chunksMetadata[_currentChunkIndex].text;
       _scrollToCurrentChunk(_currentChunkIndex);
@@ -954,8 +982,18 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           await windowsPlayer.setVolume(_volume);
           await windowsPlayer.setSpeed(_playbackSpeed);
           await windowsPlayer.setFilePath(wavPath);
+
+          if (!mounted || !_isBusy) {
+            return;
+          }
+
           await Future.delayed(const Duration(milliseconds: 150));
-          windowsPlayer.play();
+
+          if (!mounted || !_isBusy) {
+            return;
+          }
+
+          await windowsPlayer.play();
         }
         _bufferNextChunkAsync(_currentChunkIndex + 1);
       }
