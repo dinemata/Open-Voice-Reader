@@ -124,6 +124,7 @@ class PdfPageWidget extends StatelessWidget {
   final List<PdfChunkMetadata> chunks;
   final int currentChunkIndex;
   final int currentWordIndex;
+  final int? pendingChunkIndex;
   final bool isBusy;
   final Color primaryColor;
   final void Function(int chunkIndex, int wordIndex) onTap;
@@ -135,6 +136,7 @@ class PdfPageWidget extends StatelessWidget {
     required this.chunks,
     required this.currentChunkIndex,
     required this.currentWordIndex,
+    this.pendingChunkIndex,
     required this.isBusy,
     required this.primaryColor,
     required this.onTap,
@@ -155,18 +157,26 @@ class PdfPageWidget extends StatelessWidget {
     final displayHeight = displayWidth * page.heightPt / page.widthPt;
 
     final List<Rect> sentenceRects = [];
+    final List<Rect> pendingRects = [];
     Rect? wordRect;
 
     for (int ci = 0; ci < chunks.length; ci++) {
       final chunk = chunks[ci];
       if (chunk.pageNumber != page.pageNumber) continue;
-      if (ci != currentChunkIndex) continue;
 
-      for (int wi = 0; wi < chunk.pdfWords.length; wi++) {
-        final screenRect = _toScreen(chunk.pdfWords[wi].bounds);
-        sentenceRects.add(screenRect);
-        if (isBusy && wi == currentWordIndex) {
-          wordRect = screenRect;
+      // Active (blue) highlight
+      if (ci == currentChunkIndex) {
+        for (int wi = 0; wi < chunk.pdfWords.length; wi++) {
+          final screenRect = _toScreen(chunk.pdfWords[wi].bounds);
+          sentenceRects.add(screenRect);
+          if (isBusy && wi == currentWordIndex) wordRect = screenRect;
+        }
+      }
+
+      // Pending (orange) flash
+      if (pendingChunkIndex != null && ci == pendingChunkIndex) {
+        for (final w in chunk.pdfWords) {
+          pendingRects.add(_toScreen(w.bounds));
         }
       }
     }
@@ -185,6 +195,16 @@ class PdfPageWidget extends StatelessWidget {
               height: displayHeight,
               fit: BoxFit.fill,
             ),
+            if (pendingRects.isNotEmpty)
+              CustomPaint(
+                size: Size(displayWidth, displayHeight),
+                painter: HighlightPainter(
+                  sentenceRects: pendingRects,
+                  wordRect: null,
+                  sentenceColor: Colors.orange.withOpacity(0.35),
+                  wordColor: Colors.orange.withOpacity(0.6),
+                ),
+              ),
             CustomPaint(
               size: Size(displayWidth, displayHeight),
               painter: HighlightPainter(
@@ -271,6 +291,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final List<RenderedPdfPage> _renderedPages = [];
   final PdfRenderService _pdfRenderService = PdfRenderService();
   bool _isPagesRendering = false;
+
+  final List<int> _chunkHeadingLevels = [];
+  int? _pendingJumpIndex;
+  Timer? _pendingJumpTimer;
+  bool _tocOpen = false;
+
   bool get _isTxtFile => widget.book.filePath.toLowerCase().endsWith('.txt');
   double get _currentZoomFactor => globalIsOriginalLayout ? _pdfZoomFactor : _textZoomFactor;
 
@@ -349,6 +375,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _transformationController.dispose();
     _pdfVertScrollController.dispose();
     _pdfHorizScrollController.dispose();
+    _pendingJumpTimer?.cancel();
     unawaited(_pdfRenderService.dispose());
     super.dispose();
   }
@@ -423,7 +450,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _isReady = true;
         _isParsingPdf = false;
       });
-
+      _computeHeadingLevels();
       if (!_isTxtFile && _renderedPages.isEmpty) _renderAllPages(MediaQuery.of(context).size.width - 96.0);
       _recenterToCurrentChunk();
       return;
@@ -483,7 +510,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _isReady = true;
         _isParsingPdf = false;
       });
-
+      _computeHeadingLevels();
       if (!_isTxtFile && _renderedPages.isEmpty) _renderAllPages(MediaQuery.of(context).size.width - 96.0);
       _recenterToCurrentChunk();
       return;
@@ -523,8 +550,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               globalTotalPdfPages = 1;
               _isReady = true;
               _isParsingPdf = false;
-              _recenterToCurrentChunk();
             });
+            _computeHeadingLevels();
+            _recenterToCurrentChunk();
           },
         );
       } else {
@@ -569,7 +597,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               _isReady = true;
               _isParsingPdf = false;
             });
-
+            _computeHeadingLevels();
             if (_renderedPages.isEmpty) _renderAllPages(MediaQuery.of(context).size.width - 96.0);
             _recenterToCurrentChunk();
           },
@@ -1072,6 +1100,172 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
 
+  void _computeHeadingLevels() {
+    _chunkHeadingLevels.clear();
+    if (_chunksMetadata.isEmpty) return;
+
+    if (_isTxtFile) {
+      for (final chunk in _chunksMetadata) {
+        final t = chunk.text.trim();
+        final wordCount = t.split(' ').length;
+        final endsWithPunct = t.endsWith('.') || t.endsWith('?') || t.endsWith('!') || t.endsWith(':');
+        if (wordCount <= 6 && !endsWithPunct && t.length > 2) {
+          _chunkHeadingLevels.add(wordCount <= 3 ? 1 : 2);
+        } else {
+          _chunkHeadingLevels.add(0);
+        }
+      }
+      return;
+    }
+
+    final List<double> avgHeights = [];
+    for (final chunk in _chunksMetadata) {
+      if (chunk.pdfWords.isEmpty) { avgHeights.add(0); continue; }
+      final avg = chunk.pdfWords.map((w) => w.bounds.height).reduce((a, b) => a + b) / chunk.pdfWords.length;
+      avgHeights.add(avg);
+    }
+    final nonZero = avgHeights.where((h) => h > 0).toList()..sort();
+    if (nonZero.isEmpty) {
+      _chunkHeadingLevels.addAll(List.filled(_chunksMetadata.length, 0));
+      return;
+    }
+    final double bodyHeight = nonZero[(nonZero.length * 0.5).floor()];
+    final double h1Threshold = bodyHeight * 1.6;
+    final double h2Threshold = bodyHeight * 1.25;
+    final double h3Threshold = bodyHeight * 1.1;
+
+    for (int i = 0; i < _chunksMetadata.length; i++) {
+      final h = avgHeights[i];
+      final wordCount = _chunksMetadata[i].text.trim().split(' ').length;
+      if (h >= h1Threshold && wordCount <= 12) {
+        _chunkHeadingLevels.add(1);
+      } else if (h >= h2Threshold && wordCount <= 14) {
+        _chunkHeadingLevels.add(2);
+      } else if (h >= h3Threshold && wordCount <= 16) {
+        _chunkHeadingLevels.add(3);
+      } else {
+        _chunkHeadingLevels.add(0);
+      }
+    }
+  }
+
+  int _headingLevel(int index) {
+    if (index < 0 || index >= _chunkHeadingLevels.length) return 0;
+    return _chunkHeadingLevels[index];
+  }
+
+  List<({int index, String text, int level})> get _tocEntries {
+    final result = <({int index, String text, int level})>[];
+    for (int i = 0; i < _chunksMetadata.length; i++) {
+      final lvl = _headingLevel(i);
+      if (lvl > 0) result.add((index: i, text: _chunksMetadata[i].text.trim(), level: lvl));
+    }
+    return result;
+  }
+
+  void _previewThenJump(int chunkIndex) {
+    _pendingJumpTimer?.cancel();
+    setState(() {
+      _pendingJumpIndex = chunkIndex;
+      _tocOpen = false;
+    });
+    _pendingJumpTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      setState(() {
+        _selectedChunkIndex = chunkIndex;
+        _pendingJumpIndex = null;
+      });
+      if (globalIsOriginalLayout && !_isTxtFile) {
+        _isUserScrolling = false;
+        _scrollToCurrentChunk(chunkIndex);
+      } else {
+        if (_itemScrollController.isAttached) {
+          _isProgrammaticScrolling = true;
+          _itemScrollController
+              .scrollTo(index: chunkIndex, alignment: 0.2,
+              duration: const Duration(milliseconds: 350),
+              curve: Curves.easeInOutCubic)
+              .then((_) => _isProgrammaticScrolling = false);
+        }
+      }
+    });
+  }
+
+  Widget _buildTocButton(BuildContext context) {
+    final entries = _tocEntries;
+    if (entries.isEmpty) return const SizedBox.shrink();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        if (_tocOpen)
+          Container(
+            constraints: const BoxConstraints(maxWidth: 280, maxHeight: 320),
+            margin: const EdgeInsets.only(bottom: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 16, offset: const Offset(0, 4))],
+              border: Border.all(color: Colors.grey.shade200),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: ListView.builder(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                shrinkWrap: true,
+                itemCount: entries.length,
+                itemBuilder: (ctx, i) {
+                  final e = entries[i];
+                  final bool isPending = e.index == _pendingJumpIndex;
+                  final bool isCurrent = e.index == _currentChunkIndex;
+                  return InkWell(
+                    onTap: () => _previewThenJump(e.index),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      color: isPending ? Colors.orange.shade50 : isCurrent ? Theme.of(ctx).colorScheme.primaryContainer.withOpacity(0.2) : Colors.transparent,
+                      padding: EdgeInsets.fromLTRB(12.0 + (e.level - 1) * 10.0, 8, 12, 8),
+                      child: Row(children: [
+                        Container(
+                          width: 2.5, height: 14,
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            color: e.level == 1
+                                ? Theme.of(ctx).colorScheme.primary
+                                : e.level == 2
+                                ? Theme.of(ctx).colorScheme.primary.withOpacity(0.55)
+                                : Theme.of(ctx).colorScheme.primary.withOpacity(0.3),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                        Expanded(child: Text(
+                          e.text,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: e.level == 1 ? 13 : 12,
+                            fontWeight: e.level == 1 ? FontWeight.w700 : FontWeight.w500,
+                            color: isCurrent ? Theme.of(ctx).colorScheme.primary : Colors.black87,
+                          ),
+                        )),
+                      ]),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        FloatingActionButton.small(
+          heroTag: 'toc_fab',
+          onPressed: () => setState(() => _tocOpen = !_tocOpen),
+          backgroundColor: _tocOpen ? Colors.orange.shade700 : Colors.white,
+          foregroundColor: _tocOpen ? Colors.white : Colors.black87,
+          elevation: 3,
+          child: const Icon(Icons.list_rounded),
+        ),
+      ],
+    );
+  }
+
   Widget _buildPdfViewer() {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -1166,6 +1360,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                         chunks: _chunksMetadata,
                                         currentChunkIndex: _currentChunkIndex,
                                         currentWordIndex: _currentWordIndex,
+                                        pendingChunkIndex: _pendingJumpIndex,
                                         isBusy: _isBusy,
                                         primaryColor: Theme.of(context).colorScheme.primary,
                                         onTap: (ci, wi) {
@@ -1295,6 +1490,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         constraints: const BoxConstraints(minWidth: 140, maxWidth: 140),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                         padding: EdgeInsets.zero,
+                        onOpened: () { if (_isBusy) _stopPdfReading(); },
                         onSelected: (ModelConfig newValue) {
                           setState(() { _selectedModel = newValue; });
                           _initEngineAndLoadPdf();
@@ -1580,39 +1776,77 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                     itemPositionsListener: _itemPositionsListener,
                                     itemCount: _chunksMetadata.length,
                                     itemBuilder: (context, index) {
-                                      bool isCurrent = index == _currentChunkIndex;
-                                      bool isSelected = index == _selectedChunkIndex;
-                                      return Container(
-                                        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-                                        child: InkWell(
-                                          onTap: () => setState(() { _selectedChunkIndex = index; }),
-                                          borderRadius: BorderRadius.circular(8),
-                                          child: AnimatedContainer(
-                                            duration: const Duration(milliseconds: 150),
-                                            padding: const EdgeInsets.all(12),
-                                            decoration: BoxDecoration(
-                                              color: (_isBusy && isCurrent)
-                                                  ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3)
-                                                  : (isSelected ? Colors.orange.shade50 : Colors.transparent),
-                                              borderRadius: BorderRadius.circular(8),
-                                              border: isCurrent
-                                                  ? Border.all(color: Theme.of(context).colorScheme.primary, width: 1.5)
-                                                  : (isSelected ? Border.all(color: Colors.orange.shade400, width: 1.5) : null),
-                                            ),
-                                            child: (_isBusy && isCurrent)
-                                                ? RichText(
-                                              text: TextSpan(
-                                                style: TextStyle(fontSize: 17 * _textZoomFactor, height: 1.6, color: Colors.black87),
-                                                children: _buildHighlightedWords(_chunksMetadata[index].text, context),
-                                              ),
-                                            )
-                                                : Text(
-                                              _chunksMetadata[index].text,
-                                              style: TextStyle(
-                                                fontSize: 16 * _textZoomFactor,
-                                                height: 1.6,
-                                                color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87,
-                                              ),
+                                      final bool isCurrent = index == _currentChunkIndex;
+                                      final bool isSelected = index == _selectedChunkIndex;
+                                      final bool isPending = index == _pendingJumpIndex;
+                                      final int lvl = _headingLevel(index);
+                                      final bool isHeading = lvl > 0;
+
+                                      double fontSize;
+                                      FontWeight fontWeight;
+                                      EdgeInsets extraPad;
+                                      switch (lvl) {
+                                        case 1: fontSize = 22 * _textZoomFactor; fontWeight = FontWeight.w800; extraPad = const EdgeInsets.only(top: 12, bottom: 4);
+                                        case 2: fontSize = 18 * _textZoomFactor; fontWeight = FontWeight.w700; extraPad = const EdgeInsets.only(top: 8, bottom: 2);
+                                        case 3: fontSize = 15 * _textZoomFactor; fontWeight = FontWeight.w600; extraPad = const EdgeInsets.only(top: 4);
+                                        default: fontSize = 16 * _textZoomFactor; fontWeight = FontWeight.normal; extraPad = EdgeInsets.zero;
+                                      }
+
+                                      Color bgColor = Colors.transparent;
+                                      Border? border;
+                                      if (isPending) {
+                                        bgColor = Colors.orange.shade50;
+                                        border = Border.all(color: Colors.orange.shade400, width: 2);
+                                      } else if (_isBusy && isCurrent) {
+                                        bgColor = Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3);
+                                        border = Border.all(color: Theme.of(context).colorScheme.primary, width: 1.5);
+                                      } else if (isSelected) {
+                                        bgColor = Colors.orange.shade50;
+                                        border = Border.all(color: Colors.orange.shade400, width: 1.5);
+                                      } else if (isCurrent && !_isBusy) {
+                                        border = Border.all(color: Theme.of(context).colorScheme.primary.withOpacity(0.4), width: 1);
+                                      }
+
+                                      final Widget textWidget = (_isBusy && isCurrent)
+                                          ? RichText(text: TextSpan(
+                                        style: TextStyle(fontSize: fontSize, height: 1.6, color: Colors.black87, fontWeight: fontWeight),
+                                        children: _buildHighlightedWords(_chunksMetadata[index].text, context),
+                                      ))
+                                          : Text(_chunksMetadata[index].text, style: TextStyle(
+                                        fontSize: fontSize,
+                                        height: isHeading ? 1.3 : 1.6,
+                                        fontWeight: fontWeight,
+                                        color: index < _currentChunkIndex
+                                            ? (isHeading ? Colors.grey.shade500 : Colors.grey.shade400)
+                                            : (isHeading ? Colors.black : Colors.black87),
+                                      ));
+
+                                      return Padding(
+                                        padding: extraPad,
+                                        child: Container(
+                                          margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+                                          child: InkWell(
+                                            onTap: () => setState(() { _selectedChunkIndex = index; }),
+                                            borderRadius: BorderRadius.circular(8),
+                                            child: AnimatedContainer(
+                                              duration: const Duration(milliseconds: 150),
+                                              padding: EdgeInsets.fromLTRB(isHeading ? 10 : 12, 10, 12, 10),
+                                              decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8), border: border),
+                                              child: isHeading
+                                                  ? Row(children: [
+                                                Container(
+                                                  width: 3, height: fontSize * 1.1,
+                                                  margin: const EdgeInsets.only(right: 8),
+                                                  decoration: BoxDecoration(
+                                                    color: lvl == 1 ? Theme.of(context).colorScheme.primary
+                                                        : lvl == 2 ? Theme.of(context).colorScheme.primary.withOpacity(0.6)
+                                                        : Theme.of(context).colorScheme.primary.withOpacity(0.35),
+                                                    borderRadius: BorderRadius.circular(2),
+                                                  ),
+                                                ),
+                                                Expanded(child: textWidget),
+                                              ])
+                                                  : textWidget,
                                             ),
                                           ),
                                         ),
@@ -1628,6 +1862,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                             ),
                           ),
                         ),
+                        if (!_isFullscreen && _tocEntries.isNotEmpty)
+                          Positioned(
+                            bottom: _isUserScrolling ? 66 : 16,
+                            right: 16,
+                            child: _buildTocButton(context),
+                          ),
                         if (_isUserScrolling && !_isFullscreen)
                           Positioned(
                             bottom: 16, right: 16,
