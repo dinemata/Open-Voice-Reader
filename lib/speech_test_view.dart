@@ -271,6 +271,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   final Map<int, String> _pregeneratedAudioCache = {};
 
   final SanitizerOptions _sanitizerOptions = SanitizerOptions();
+  bool _skipParentheses = false;
+  bool _skipLinks = false;
   bool _skipPageNumbers = false;
 
   double _textZoomFactor = 1.0;
@@ -327,11 +329,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     _itemPositionsListener.itemPositions.addListener(_scrollListener);
     _setupAudioListeners();
-    _pdfVertScrollController.addListener(_onPdfManualScroll);
-    _pdfHorizScrollController.addListener(_onPdfManualScroll);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _pdfVertScrollController.addListener(_onPdfScroll);
+      _pdfHorizScrollController.addListener(_onPdfScroll);
+    });
   }
 
-  void _onPdfManualScroll() {
+  void _onPdfScroll() {
     if (_isProgrammaticScrolling) return;
     if (!_isUserScrolling) setState(() { _isUserScrolling = true; });
   }
@@ -375,21 +379,19 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   @override
   void dispose() {
-    if (Platform.isWindows) {
-      windowsPlayer.stop();
-    }
-
-    _itemPositionsListener.itemPositions.removeListener(_scrollListener);
     _playbackStateSubscription?.cancel();
     _positionSubscription?.cancel();
+    _pendingJumpTimer?.cancel();
+    _itemPositionsListener.itemPositions.removeListener(_scrollListener);
+    _pdfVertScrollController.removeListener(_onPdfScroll);
+    _pdfHorizScrollController.removeListener(_onPdfScroll);
+    if (!Platform.isAndroid && !Platform.isIOS) windowsPlayer.stop();
     _highlightNotifier.dispose();
     _keyboardFocusNode.dispose();
     _transformationController.dispose();
     _pdfVertScrollController.dispose();
     _pdfHorizScrollController.dispose();
-    _pendingJumpTimer?.cancel();
     unawaited(_pdfRenderService.dispose());
-
     super.dispose();
   }
 
@@ -893,7 +895,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   void _recenterToCurrentChunk() {
     setState(() { _isUserScrolling = false; });
-    _scrollToCurrentChunk(_currentChunkIndex);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scrollToCurrentChunk(_currentChunkIndex);
+    });
   }
 
   void _startPdfReading() {
@@ -964,10 +968,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
 
     try {
-      final rawText = _chunksMetadata[_currentChunkIndex].text;
-      if (_skipPageNumbers && RegExp(r'^\d{1,4}$').hasMatch(rawText.trim())) {
-        _skipToNextFailedChunk();
-        return;
+      String rawText = _chunksMetadata[_currentChunkIndex].text;
+      if (_skipPageNumbers && RegExp(r'^\d{1,4}$').hasMatch(rawText.trim())) { _skipToNextFailedChunk(); return; }
+      if (_skipLinks && RegExp(r'^https?://\S+$').hasMatch(rawText.trim())) { _skipToNextFailedChunk(); return; }
+      if (_skipParentheses) {
+        rawText = rawText.replaceAll(RegExp(r'\([^)]*\)'), ' ').replaceAll(RegExp(r'\s{2,}'), ' ').trim();
+        if (rawText.isEmpty) { _skipToNextFailedChunk(); return; }
       }
       _scrollToCurrentChunk(_currentChunkIndex);
 
@@ -1035,32 +1041,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (!_isBusy) return;
     final player = (Platform.isAndroid || Platform.isIOS) ? audioHandler.player : windowsPlayer;
     final currentPos = player.position;
-    final duration = player.duration ?? Duration.zero;
     final targetPos = currentPos + Duration(seconds: seconds);
-    if (seconds > 0) {
-      if (targetPos <= duration) {
-        player.seek(targetPos);
+    final duration = player.duration;
+    if (duration != null) {
+      if (targetPos < Duration.zero) {
+        player.seek(Duration.zero);
+      } else if (targetPos > duration) {
+        if (_stopAtEndOfBlock) _stopAudioAndPop(); else _handleTrackComplete();
       } else {
-        if (_stopAtEndOfBlock) { _stopAudioAndPop(); return; }
-        if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
-        _currentWordIndex = 0;
-        _currentChunkIndex++;
-        _saveCurrentProgress();
-        _executeChunkReading();
-      }
-    } else {
-      if (targetPos >= Duration.zero) {
         player.seek(targetPos);
-      } else {
-        if (_currentChunkIndex > 0) {
-          if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
-          _currentWordIndex = 0;
-          _currentChunkIndex--;
-          _saveCurrentProgress();
-          _executeChunkReading();
-        } else {
-          player.seek(Duration.zero);
-        }
       }
     }
   }
@@ -1125,8 +1114,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     );
   }
 
-  void _handlePopAction() {
-    Navigator.of(context).pop();
+  void _handlePopAction() async {
+    if (_isBusy) {
+      _isBusy = false;
+      if (Platform.isAndroid || Platform.isIOS) { await audioHandler.stop(); }
+      else { await windowsPlayer.stop(); }
+    }
+    if (mounted) Navigator.of(context).pop();
   }
 
   Widget _buildCpuIndicator(int load) {
@@ -1148,20 +1142,30 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   List<TextSpan> _buildHighlightedWords(String text, BuildContext context) {
-    List<String> words = text.split(' ');
-    List<TextSpan> spans = [];
+    final primary = Theme.of(context).colorScheme.primary;
+    final onPrimary = Theme.of(context).colorScheme.onPrimaryContainer;
+    final words = text.split(' ');
+    final spans = <TextSpan>[];
+    int depth = 0;
     for (int i = 0; i < words.length; i++) {
-      bool isCurrent = i == _currentWordIndex;
-      spans.add(
-        TextSpan(
-          text: words[i] + (i == words.length - 1 ? "" : " "),
-          style: TextStyle(
-            fontWeight: i == _currentWordIndex ? FontWeight.bold : FontWeight.normal,
-            backgroundColor: isCurrent ? Theme.of(context).colorScheme.primary.withOpacity(0.2) : Colors.transparent,
-            color: isCurrent ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onPrimaryContainer,
-          ),
-        ),
-      );
+      final word = words[i];
+      final bool isCurrent = i == _currentWordIndex;
+      for (final ch in word.characters) {
+        if (ch == '(') depth++;
+        else if (ch == ')' && depth > 0) depth--;
+      }
+      final bool inParen = depth > 0 || (word.contains(')') && !word.contains('('));
+      Color textColor; Color bgColor;
+      if (_skipParentheses && inParen) {
+        textColor = Colors.purple.shade400; bgColor = Colors.purple.withOpacity(0.07);
+      } else if (isCurrent) {
+        textColor = primary; bgColor = primary.withOpacity(0.2);
+      } else {
+        textColor = onPrimary; bgColor = Colors.transparent;
+      }
+      spans.add(TextSpan(text: word + (i == words.length - 1 ? '' : ' '),
+          style: TextStyle(fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+              backgroundColor: bgColor, color: textColor)));
     }
     return spans;
   }
@@ -1230,62 +1234,31 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     return result;
   }
 
-  // Orange highlight only. Jump happens when play is pressed.
   void _previewThenJump(int chunkIndex) {
     _pendingJumpTimer?.cancel();
     setState(() {
       _pendingJumpIndex = chunkIndex;
-      _selectedChunkIndex = chunkIndex;
       _tocOpen = false;
     });
-    if (!globalIsOriginalLayout || _isTxtFile) {
-      if (_itemScrollController.isAttached) {
-        _isProgrammaticScrolling = true;
-        _itemScrollController
-            .scrollTo(index: chunkIndex, alignment: 0.2,
-            duration: const Duration(milliseconds: 350),
-            curve: Curves.easeInOutCubic)
-            .then((_) => _isProgrammaticScrolling = false);
+    _pendingJumpTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      setState(() {
+        _selectedChunkIndex = chunkIndex;
+        _pendingJumpIndex = null;
+      });
+      if (globalIsOriginalLayout && !_isTxtFile) {
+        _isUserScrolling = false;
+        _scrollToCurrentChunk(chunkIndex);
+      } else {
+        if (_itemScrollController.isAttached) {
+          _isProgrammaticScrolling = true;
+          _itemScrollController
+              .scrollTo(index: chunkIndex, alignment: 0.2,
+              duration: const Duration(milliseconds: 350),
+              curve: Curves.easeInOutCubic)
+              .then((_) => _isProgrammaticScrolling = false);
+        }
       }
-    } else {
-      _scrollToPending(chunkIndex);
-    }
-  }
-
-  void _scrollToPending(int chunkIndex) {
-    if (_renderedPages.isEmpty || chunkIndex >= _chunksMetadata.length) return;
-    final chunk = _chunksMetadata[chunkIndex];
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_pdfVertScrollController.hasClients) return;
-      try {
-        final double viewportH = _pdfVertScrollController.position.viewportDimension;
-        final double viewportW = _pdfHorizScrollController.hasClients
-            ? _pdfHorizScrollController.position.viewportDimension
-            : viewportH;
-        final double dw = viewportW - 96.0;
-        double pageTopY = 16.0;
-        for (final rp in _renderedPages) {
-          if (rp.pageNumber == chunk.pageNumber) break;
-          pageTopY += (dw * rp.heightPt / rp.widthPt) + 16.0;
-        }
-        double wordFracY = 0.1;
-        if (chunk.pdfWords.isNotEmpty) {
-          final targetRp = _renderedPages.firstWhere(
-                  (rp) => rp.pageNumber == chunk.pageNumber, orElse: () => _renderedPages.first);
-          wordFracY = ((chunk.pdfWords[0].bounds.top + chunk.pdfWords[0].bounds.height / 2)
-              / targetRp.heightPt).clamp(0.0, 1.0);
-        }
-        final targetRp = _renderedPages.firstWhere(
-                (rp) => rp.pageNumber == chunk.pageNumber, orElse: () => _renderedPages.first);
-        final double pageH = dw * targetRp.heightPt / targetRp.widthPt;
-        final double wordAbsY = pageTopY + (pageH * wordFracY);
-        final double scrollTarget = (wordAbsY * _pdfZoomFactor) - (viewportH / 2);
-        _pdfVertScrollController.animateTo(
-          scrollTarget.clamp(0.0, _pdfVertScrollController.position.maxScrollExtent),
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeInOutCubic,
-        );
-      } catch (_) {}
     });
   }
 
@@ -1296,10 +1269,18 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        FloatingActionButton.small(
+          heroTag: 'toc_fab',
+          onPressed: () => setState(() => _tocOpen = !_tocOpen),
+          backgroundColor: _tocOpen ? Colors.orange.shade700 : Colors.white,
+          foregroundColor: _tocOpen ? Colors.white : Colors.black87,
+          elevation: 3,
+          child: const Icon(Icons.format_list_bulleted_rounded),
+        ),
         if (_tocOpen)
           Container(
             constraints: const BoxConstraints(maxWidth: 280, maxHeight: 320),
-            margin: const EdgeInsets.only(top: 8),
+            margin: const EdgeInsets.only(top: 6),
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(12),
@@ -1352,14 +1333,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               ),
             ),
           ),
-        FloatingActionButton.small(
-          heroTag: 'toc_fab',
-          onPressed: () => setState(() => _tocOpen = !_tocOpen),
-          backgroundColor: _tocOpen ? Colors.orange.shade700 : Colors.white,
-          foregroundColor: _tocOpen ? Colors.white : Colors.black87,
-          elevation: 3,
-          child: const Icon(Icons.format_list_bulleted_rounded),
-        ),
       ],
     );
   }
@@ -1462,7 +1435,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                         isBusy: _isBusy,
                                         primaryColor: Theme.of(context).colorScheme.primary,
                                         onTap: (ci, wi) {
-                                          _previewThenJump(ci);
+                                          setState(() {
+                                            _currentChunkIndex = ci;
+                                            _currentWordIndex = wi;
+                                            _isUserScrolling = false;
+                                          });
+                                          _saveCurrentProgress();
+                                          if (_isBusy) _executeChunkReading(); else _startPdfReading();
                                         },
                                       ),
                                     ),
@@ -1484,6 +1463,80 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     );
   }
 
+
+  Widget _buildSpeedButton(BuildContext context) {
+    final spd = _playbackSpeed;
+    final label = spd % 1 == 0 ? '${spd.toInt()}x' : '${spd}x';
+    return GestureDetector(
+      onTap: () => _showSpeedSheet(context),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(color: const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(6)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F))),
+          const SizedBox(width: 2),
+          const Icon(Icons.keyboard_arrow_up_rounded, color: Color(0xFF5F6368), size: 14),
+        ]),
+      ),
+    );
+  }
+
+  void _showSpeedSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          const popularSpeeds = [0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Rychlost čtení', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 14),
+              Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: popularSpeeds.map((spd) {
+                final bool active = (_playbackSpeed - spd).abs() < 0.01;
+                return GestureDetector(
+                  onTap: () { _changeSpeed(spd); setLocal(() {}); },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: active ? Theme.of(ctx).colorScheme.primary : const Color(0xFFF1F3F4),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text('${spd}x', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                        color: active ? Colors.white : Colors.black87)),
+                  ),
+                );
+              }).toList()),
+              const SizedBox(height: 14),
+              Row(children: [
+                const Text('0.5', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                Expanded(child: SliderTheme(
+                  data: SliderTheme.of(ctx).copyWith(
+                    trackHeight: 4,
+                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
+                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+                    activeTrackColor: Theme.of(ctx).colorScheme.primary,
+                    thumbColor: Theme.of(ctx).colorScheme.primary,
+                    inactiveTrackColor: Colors.grey.shade200,
+                    overlayColor: Theme.of(ctx).colorScheme.primary.withOpacity(0.15),
+                  ),
+                  child: Slider(
+                    value: _playbackSpeed.clamp(0.5, 4.0), min: 0.5, max: 4.0, divisions: 28,
+                    onChanged: (v) { final snapped = (v * 4).round() / 4.0; _changeSpeed(snapped); setLocal(() {}); },
+                  ),
+                )),
+                const Text('4.0', style: TextStyle(fontSize: 10, color: Colors.grey)),
+              ]),
+              Center(child: Text('${_playbackSpeed}x',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Theme.of(ctx).colorScheme.primary))),
+            ]),
+          );
+        },
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1577,7 +1630,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: PopupMenuButton<ModelConfig>(
-                        enabled: !_isBusy && _isReady,
+                        enabled: _isReady,
                         offset: const Offset(0, 40),
                         constraints: const BoxConstraints(minWidth: 140, maxWidth: 140),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -1685,78 +1738,28 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                   splashRadius: 20,
                   tooltip: 'Parametry',
-                  onSelected: (value) async {
-                    if (value == 'pages') {
-                      setState(() { _skipPageNumbers = !_skipPageNumbers; });
-                      return;
-                    }
-                    setState(() {
-                      if (value == 'parentheses') {
-                        _sanitizerOptions.readParentheses = !_sanitizerOptions.readParentheses;
-                      } else if (value == 'links') {
-                        _sanitizerOptions.readLinks = !_sanitizerOptions.readLinks;
-                      }
-                    });
-                    if (!_isParsingPdf && _isReady) {
-                      _initEngineAndLoadPdf();
-                    }
+                  onSelected: (value) { setState(() {
+                    if (value == 'parentheses') _skipParentheses = !_skipParentheses;
+                    else if (value == 'links') _skipLinks = !_skipLinks;
+                    else if (value == 'pages') _skipPageNumbers = !_skipPageNumbers;
+                  }); },
+                  itemBuilder: (BuildContext context) {
+                    PopupMenuEntry<String> row(String val, bool active, String label, Color dot) =>
+                        PopupMenuItem<String>(value: val, height: 40,
+                            child: Row(children: [
+                              Container(width: 4, height: 22, margin: const EdgeInsets.only(right: 6),
+                                  decoration: BoxDecoration(color: active ? dot : Colors.grey.shade200, borderRadius: BorderRadius.circular(2))),
+                              SizedBox(width: 22, height: 22, child: Checkbox(value: active, activeColor: dot,
+                                  onChanged: (_) { Navigator.pop(context, val); })),
+                              const SizedBox(width: 6),
+                              Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                            ]));
+                    return <PopupMenuEntry<String>>[
+                      row('parentheses', _skipParentheses, 'Přeskočit závorky', Colors.purple.shade400),
+                      row('links', _skipLinks, 'Přeskočit odkazy', Colors.blue.shade400),
+                      row('pages', _skipPageNumbers, 'Přeskočit čísla stran', Colors.orange.shade400),
+                    ];
                   },
-                  itemBuilder: (BuildContext context) => [
-                    PopupMenuItem(
-                      value: 'parentheses',
-                      height: 38,
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 24, height: 24,
-                            child: Checkbox(
-                              value: _sanitizerOptions.readParentheses,
-                              activeColor: const Color(0xFF1A73E8),
-                              onChanged: (bool? val) { Navigator.pop(context, 'parentheses'); },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          const Text('Číst závorky (přegenerovat)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'links',
-                      height: 38,
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 24, height: 24,
-                            child: Checkbox(
-                              value: _sanitizerOptions.readLinks,
-                              activeColor: const Color(0xFF1A73E8),
-                              onChanged: (bool? val) { Navigator.pop(context, 'links'); },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          const Text('Číst odkazy (přegenerovat)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'pages',
-                      height: 38,
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 24, height: 24,
-                            child: Checkbox(
-                              value: _skipPageNumbers,
-                              activeColor: const Color(0xFF1A73E8),
-                              onChanged: (bool? val) { Navigator.pop(context, 'pages'); },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          const Text('Přeskočit čísla stran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                        ],
-                      ),
-                    ),
-                  ],
                   child: const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     child: Icon(Icons.tune_rounded, color: Color(0xFF5F6368), size: 20),
@@ -1868,6 +1871,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                   child: ScrollablePositionedList.builder(
                                     itemScrollController: _itemScrollController,
                                     itemPositionsListener: _itemPositionsListener,
+                                    padding: const EdgeInsets.only(top: 52),
                                     itemCount: _chunksMetadata.length,
                                     itemBuilder: (context, index) {
                                       final bool isCurrent = index == _currentChunkIndex;
@@ -1958,8 +1962,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         ),
                         if (!_isFullscreen && _tocEntries.isNotEmpty)
                           Positioned(
-                            top: 12,
-                            left: 12,
+                            top: 12, left: 12,
                             child: _buildTocButton(context),
                           ),
                         if (_isUserScrolling && !_isFullscreen)

@@ -146,12 +146,7 @@ class TextSanitizer {
             reconstructedWordText.clear();
             if (cleanWord.isEmpty) continue;
 
-            if (!options.readLinks) {
-              if (cleanWord.contains(RegExp(r'https?://\S+|www\.\S+'))) continue;
-            }
-            if (!options.readPageNumbers) {
-              if (RegExp(r'^\d+$').hasMatch(cleanWord)) continue;
-            }
+            // Links and page numbers are now filtered at read-time by runtime skip flags
 
             if (reconstructedWordBounds != null) {
               structuralBlockWords.add(PdfWordGeometry(bounds: reconstructedWordBounds, text: cleanWord));
