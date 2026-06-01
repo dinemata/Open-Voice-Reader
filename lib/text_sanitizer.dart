@@ -9,9 +9,9 @@ class SanitizerOptions {
   bool readPageNumbers;
 
   SanitizerOptions({
-    this.readParentheses = false,
-    this.readLinks = false,
-    this.readPageNumbers = false,
+    this.readParentheses = true,
+    this.readLinks = true,
+    this.readPageNumbers = true,
   });
 }
 
@@ -146,7 +146,12 @@ class TextSanitizer {
             reconstructedWordText.clear();
             if (cleanWord.isEmpty) continue;
 
-            // Links and page numbers are now filtered at read-time by runtime skip flags
+            if (!options.readLinks) {
+              if (cleanWord.contains(RegExp(r'https?://\S+|www\.\S+'))) continue;
+            }
+            if (!options.readPageNumbers) {
+              if (RegExp(r'^\d+$').hasMatch(cleanWord)) continue;
+            }
 
             if (reconstructedWordBounds != null) {
               structuralBlockWords.add(PdfWordGeometry(bounds: reconstructedWordBounds, text: cleanWord));
@@ -216,6 +221,14 @@ class TextSanitizer {
         .replaceAll('&', ' a ')
         .replaceAll('@', ' zavináč ')
         .replaceAll('/', ' lomítko ');
+  }
+
+  /// Returns true if [text] starts with a bullet or numbered-list marker.
+  static bool isBulletLine(String text) {
+    final t = text.trimLeft();
+    if (t.startsWith('• ') || t.startsWith('- ') || t.startsWith('* ')) return true;
+    if (RegExp(r'^\d+\.\s').hasMatch(t)) return true;
+    return false;
   }
 
   static bool shouldStartNewBlock({
