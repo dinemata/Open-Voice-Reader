@@ -5,8 +5,6 @@
 // The key is a Dart RegExp string (no surrounding slashes).
 // Use \\b for word boundaries. Use (?i) flag via caseSensitive: false.
 
-import 'package:flutter/foundation.dart';
-
 class DictionaryJirka {
   /// Returns a list of (pattern, replacement) pairs applied at TTS speak-time.
   static List<(RegExp, String)> get entries => _entries;

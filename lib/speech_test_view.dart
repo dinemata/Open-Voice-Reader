@@ -280,6 +280,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   double _textZoomFactor = 1.0;
   double _pdfZoomFactor = 0.5;
+  double _pdfBaselineZoom = 0.7; // "100%" reference, computed from screen width in initState
   final double _zoomStep = 0.1;
   final double _minZoom = 0.2;
   final double _maxZoom = 5.0;
@@ -305,6 +306,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   bool _parametryOpen = false;
   final LayerLink _parametryLayerLink = LayerLink();
   OverlayEntry? _parametryOverlay;
+  bool _speedOpen = false;
+  final LayerLink _speedLayerLink = LayerLink();
+  OverlayEntry? _speedOverlay;
 
   bool get _isTxtFile => widget.book.filePath.toLowerCase().endsWith('.txt');
   double get _currentZoomFactor => globalIsOriginalLayout ? _pdfZoomFactor : _textZoomFactor;
@@ -343,6 +347,18 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _pdfVertScrollController.addListener(_onPdfScroll);
       _pdfHorizScrollController.addListener(_onPdfScroll);
+      // Compute screen-adaptive baseline zoom: ~0.8 on a 400 px wide screen,
+      // scaling proportionally so smaller screens get a larger baseline fraction.
+      // Formula: baseline = (referenceWidth / screenWidth) * referenceBaseline
+      // where referenceWidth=400, referenceBaseline=0.8 → clamped [0.5, 1.0].
+      if (mounted) {
+        final screenW = MediaQuery.of(context).size.width;
+        final baseline = ((400.0 / screenW) * 0.8).clamp(0.5, 1.0);
+        setState(() {
+          _pdfBaselineZoom = baseline;
+          _pdfZoomFactor = baseline; // start at 100 %
+        });
+      }
     });
   }
 
@@ -401,6 +417,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _transformationController.dispose();
     _pdfVertScrollController.dispose();
     _pdfHorizScrollController.dispose();
+    _speedOverlay?.remove();
     unawaited(_pdfRenderService.dispose());
     super.dispose();
   }
@@ -1069,6 +1086,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   void _changeSpeed(double speed) async {
     setState(() { _playbackSpeed = speed; });
+    // Persist speed immediately so it survives chunk transitions and app restarts
+    SharedPreferences.getInstance().then((prefs) => prefs.setDouble('speed_${widget.book.id}', speed));
     if (_isBusy) {
       if (Platform.isAndroid || Platform.isIOS) {
         await audioHandler.player.setSpeed(speed);
@@ -1473,84 +1492,178 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   Widget _buildSpeedButton(BuildContext context) {
     final spd = _playbackSpeed;
     final label = spd % 1 == 0 ? '${spd.toInt()}x' : '${spd}x';
-    return Tooltip(
-      message: 'Rychlost čtení',
-      child: GestureDetector(
-        onTap: () => _showSpeedSheet(context),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-          decoration: BoxDecoration(color: const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(7)),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.speed_rounded, size: 15, color: Color(0xFF5F6368)),
-            const SizedBox(width: 3),
-            Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F))),
-          ]),
+    return CompositedTransformTarget(
+      link: _speedLayerLink,
+      child: Tooltip(
+        message: 'Rychlost čtení',
+        child: GestureDetector(
+          onTap: () => _toggleSpeedOverlay(context),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+            decoration: BoxDecoration(
+              color: _speedOpen ? const Color(0xFF1A73E8) : const Color(0xFFF1F3F4),
+              borderRadius: BorderRadius.circular(7),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.speed_rounded, size: 15, color: _speedOpen ? Colors.white : const Color(0xFF5F6368)),
+              const SizedBox(width: 3),
+              Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _speedOpen ? Colors.white : const Color(0xFF1F1F1F))),
+            ]),
+          ),
         ),
       ),
     );
   }
 
-  void _showSpeedSheet(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) {
-          const List<({double spd, bool popular})> speeds = [
-            (spd: 0.5, popular: false),(spd: 0.75, popular: false),(spd: 1.0, popular: true),
-            (spd: 1.25, popular: true),(spd: 1.5, popular: true),(spd: 1.75, popular: false),
-            (spd: 2.0, popular: true),(spd: 2.5, popular: false),(spd: 3.0, popular: true),
-          ];
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                const Icon(Icons.speed_rounded, size: 18, color: Color(0xFF5F6368)),
-                const SizedBox(width: 8),
-                const Text('Rychlost čtení', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-              ]),
-              const SizedBox(height: 14),
-              // Slider with speed ticks
-              Stack(children: [
-                SliderTheme(
-                  data: SliderTheme.of(ctx).copyWith(trackHeight: 4,
-                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 9),
-                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 18),
-                      activeTrackColor: Theme.of(ctx).colorScheme.primary,
-                      thumbColor: Theme.of(ctx).colorScheme.primary,
-                      inactiveTrackColor: Colors.grey.shade200,
-                      overlayColor: Theme.of(ctx).colorScheme.primary.withOpacity(0.15)),
-                  child: Slider(value: _playbackSpeed.clamp(0.5, 4.0), min: 0.5, max: 4.0, divisions: 28,
-                      onChanged: (v) { final snapped=(v*4).round()/4.0; _changeSpeed(snapped); setLocal((){}); }),
+  void _toggleSpeedOverlay(BuildContext context) {
+    if (_speedOpen) {
+      _closeSpeedOverlay();
+    } else {
+      _openSpeedOverlay(context);
+    }
+  }
+
+  void _openSpeedOverlay(BuildContext context) {
+    _speedOverlay?.remove();
+    _speedOpen = true;
+    if (mounted) setState(() {});
+
+    const List<({double spd, bool popular})> speeds = [
+      (spd: 0.5, popular: false), (spd: 0.75, popular: false), (spd: 1.0, popular: true),
+      (spd: 1.25, popular: true), (spd: 1.5, popular: true), (spd: 1.75, popular: false),
+      (spd: 2.0, popular: true), (spd: 2.5, popular: false), (spd: 3.0, popular: true),
+    ];
+
+    _speedOverlay = OverlayEntry(builder: (ctx) {
+      return Stack(children: [
+        // Transparent barrier — tap anywhere to close
+        Positioned.fill(child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: _closeSpeedOverlay,
+        )),
+        CompositedTransformFollower(
+          link: _speedLayerLink,
+          showWhenUnlinked: false,
+          targetAnchor: Alignment.topRight,
+          followerAnchor: Alignment.bottomRight,
+          offset: const Offset(0, -6),
+          child: Material(
+            color: Colors.transparent,
+            child: StatefulBuilder(builder: (_, setLocal) {
+              // Popular speed positions along the 0.5–3.0 range (fraction 0..1 = bottom..top)
+              // Range span = 2.5. Popular speeds: 1.0, 1.25, 1.5, 2.0, 3.0
+              const double rangeMin = 0.5;
+              const double rangeMax = 3.0;
+              const double rangeSpan = rangeMax - rangeMin;
+              const double panelH = 220.0;
+              const double thumbR = 9.0;
+              const double trackTop = thumbR;
+              const double trackBottom = panelH - thumbR;
+              const double trackH = trackBottom - trackTop;
+
+              double fracFor(double spd) => ((spd - rangeMin) / rangeSpan).clamp(0.0, 1.0);
+              // y=0 is top of panel → higher speed = lower y
+              double yFor(double spd) => trackTop + (1.0 - fracFor(spd)) * trackH;
+
+              return Container(
+                width: 120,
+                constraints: const BoxConstraints(minHeight: 260),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.16), blurRadius: 18, offset: const Offset(0, 4))],
+                  border: Border.all(color: Colors.grey.shade200),
                 ),
-              ]),
-              const SizedBox(height: 8),
-              // Speed chips positioned along slider range
-              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: speeds.where((e) => e.popular).map((e) {
-                    final bool active = (_playbackSpeed - e.spd).abs() < 0.01;
-                    return GestureDetector(
-                      onTap: () { _changeSpeed(e.spd); setLocal(() {}); },
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                            color: active ? Theme.of(ctx).colorScheme.primary : const Color(0xFFF1F3F4),
-                            borderRadius: BorderRadius.circular(8),
-                            border: !active ? Border.all(color: Colors.grey.shade300) : null),
-                        child: Text('${e.spd}x', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
-                            color: active ? Colors.white : Colors.black87)),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  // Header
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+                    child: Row(children: [
+                      const Icon(Icons.speed_rounded, size: 14, color: Color(0xFF5F6368)),
+                      const SizedBox(width: 4),
+                      Text(_playbackSpeed % 1 == 0 ? '${_playbackSpeed.toInt()}x' : '${_playbackSpeed}x',
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF1F1F1F))),
+                    ]),
+                  ),
+                  const Divider(height: 1, thickness: 0.5),
+                  // Vertical slider + speed chip labels
+                  SizedBox(
+                    height: panelH,
+                    child: Stack(clipBehavior: Clip.none, children: [
+                      // Slider column (left side)
+                      Positioned(
+                        left: 14, top: 0, bottom: 0, width: 40,
+                        child: RotatedBox(
+                          quarterTurns: 3,
+                          child: SliderTheme(
+                            data: SliderThemeData(
+                              trackHeight: 3,
+                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: thumbR),
+                              overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+                              activeTrackColor: const Color(0xFF1A73E8),
+                              thumbColor: const Color(0xFF1A73E8),
+                              inactiveTrackColor: Colors.grey.shade200,
+                              overlayColor: const Color(0xFF1A73E8).withOpacity(0.15),
+                            ),
+                            child: Slider(
+                              value: _playbackSpeed.clamp(rangeMin, rangeMax),
+                              min: rangeMin, max: rangeMax, divisions: 20,
+                              onChanged: (v) {
+                                final snapped = (v * 4).round() / 4.0;
+                                _changeSpeed(snapped);
+                                setLocal(() {});
+                              },
+                            ),
+                          ),
+                        ),
                       ),
-                    );
-                  }).toList()),
-              const SizedBox(height: 10),
-              Center(child: Text('${_playbackSpeed}x',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: Theme.of(ctx).colorScheme.primary))),
-            ]),
-          );
-        },
-      ),
-    );
+                      // Popular speed chips — right side, aligned to slider positions
+                      for (final e in speeds.where((s) => s.popular))
+                        Positioned(
+                          right: 6,
+                          top: yFor(e.spd) - 13,
+                          child: GestureDetector(
+                            onTap: () { _changeSpeed(e.spd); setLocal(() {}); },
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 120),
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: (_playbackSpeed - e.spd).abs() < 0.01
+                                    ? const Color(0xFF1A73E8)
+                                    : const Color(0xFFF1F3F4),
+                                borderRadius: BorderRadius.circular(6),
+                                border: (_playbackSpeed - e.spd).abs() < 0.01
+                                    ? null
+                                    : Border.all(color: Colors.grey.shade300),
+                              ),
+                              child: Text(
+                                e.spd % 1 == 0 ? '${e.spd.toInt()}x' : '${e.spd}x',
+                                style: TextStyle(
+                                  fontSize: 11, fontWeight: FontWeight.w700,
+                                  color: (_playbackSpeed - e.spd).abs() < 0.01 ? Colors.white : Colors.black87,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ]),
+                  ),
+                ]),
+              );
+            }),
+          ),
+        ),
+      ]);
+    });
+
+    Overlay.of(context).insert(_speedOverlay!);
+  }
+
+  void _closeSpeedOverlay() {
+    _speedOverlay?.remove();
+    _speedOverlay = null;
+    _speedOpen = false;
+    if (mounted) setState(() {});
   }
 
   @override
@@ -1739,7 +1852,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                     Container(
                       constraints: const BoxConstraints(minWidth: 36),
                       alignment: Alignment.center,
-                      child: Text('${(_currentZoomFactor * 100).toStringAsFixed(0)}%', style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.w700)),
+                      child: Text(
+                        '${((_currentZoomFactor / _pdfBaselineZoom) * 100).toStringAsFixed(0)}%',
+                        style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.w700),
+                      ),
                     ),
                     IconButton(
                       icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
@@ -2000,55 +2116,59 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         if (_isFullscreen)
                           Positioned(
                             top: 16, right: 16,
+                            child: Container(
+                              decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), shape: BoxShape.circle),
+                              child: IconButton(
+                                icon: const Icon(Icons.fullscreen_exit_rounded, color: Colors.black87),
+                                onPressed: () => setState(() => _isFullscreen = false),
+                              ),
+                            ),
+                          ),
+                        if (_isFullscreen)
+                          Positioned(
+                            bottom: 20, right: 16,
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
-                                Container(
-                                  decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), shape: BoxShape.circle),
-                                  child: IconButton(
-                                    icon: const Icon(Icons.fullscreen_exit_rounded, color: Colors.black87),
-                                    onPressed: () => setState(() => _isFullscreen = false),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                // Mini playback island
-                                Container(
-                                  decoration: BoxDecoration(
-                                    color: Colors.black.withOpacity(0.55),
-                                    borderRadius: BorderRadius.circular(24),
-                                  ),
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                    IconButton(
-                                      icon: const Icon(Icons.replay_10_rounded, size: 20, color: Colors.white),
-                                      onPressed: _isBusy ? () => _seekRelative(-10) : null,
-                                      padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                                    ),
-                                    IconButton(
-                                      icon: Icon(
-                                        _isBusy ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                                        size: 22, color: Colors.white,
-                                      ),
-                                      onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
-                                      padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.forward_10_rounded, size: 20, color: Colors.white),
-                                      onPressed: _isBusy ? () => _seekRelative(10) : null,
-                                      padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                                    ),
-                                  ]),
-                                ),
                                 if (_isUserScrolling) ...[
-                                  const SizedBox(height: 8),
                                   FloatingActionButton.small(
                                     onPressed: _recenterToCurrentChunk,
                                     backgroundColor: const Color(0xFF1A73E8),
                                     foregroundColor: Colors.white,
                                     child: const Icon(Icons.center_focus_strong_rounded),
                                   ),
+                                  const SizedBox(height: 10),
                                 ],
+                                // Mini playback island — black on white, slightly larger
+                                Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(28),
+                                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.18), blurRadius: 12, offset: const Offset(0, 3))],
+                                  ),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.replay_10_rounded, size: 26, color: Colors.black87),
+                                      onPressed: _isBusy ? () => _seekRelative(-10) : null,
+                                      padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                    ),
+                                    IconButton(
+                                      icon: Icon(
+                                        _isBusy ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                                        size: 28, color: Colors.black87,
+                                      ),
+                                      onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
+                                      padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.forward_10_rounded, size: 26, color: Colors.black87),
+                                      onPressed: _isBusy ? () => _seekRelative(10) : null,
+                                      padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                    ),
+                                  ]),
+                                ),
                               ],
                             ),
                           ),
@@ -2084,14 +2204,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         const SizedBox(width: 6),
                         SizedBox(width: 48, height: 48, child: Material(type: MaterialType.transparency,
                             child: InkWell(customBorder: const CircleBorder(),
-                                onTap: _isReady ? (isCompleted ? _restartAudioFromBeginning
-                                    : (_isBusy ? _stopPdfReading : _startPdfReading)) : null,
+                                onTap: _isReady ? (showJumpButton ? _jumpToSelectedAndPlay
+                                    : (isCompleted ? _restartAudioFromBeginning
+                                    : (_isBusy ? _stopPdfReading : _startPdfReading))) : null,
                                 child: showJumpButton
-                                    ? Stack(alignment: Alignment.center, children: [
-                                  Icon(Icons.play_circle_filled_rounded, color: Colors.orange.shade700, size: 44),
-                                  Positioned(right: 7, child: Container(width: 3, height: 14,
-                                      decoration: BoxDecoration(color: Colors.orange.shade700, borderRadius: BorderRadius.circular(1)))),
-                                ])
+                                    ? Container(
+                                  width: 44, height: 44,
+                                  decoration: BoxDecoration(color: Colors.orange.shade700, shape: BoxShape.circle),
+                                  child: const Icon(Icons.skip_next_rounded, color: Colors.white, size: 28),
+                                )
                                     : (isCompleted
                                     ? const Icon(Icons.replay_rounded, color: Color(0xFF1A73E8), size: 44)
                                     : Icon(_isBusy ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded,
