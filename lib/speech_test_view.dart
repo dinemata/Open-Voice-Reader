@@ -278,7 +278,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   bool _skipLinks = false;
   bool _skipPageNumbers = false;
 
-  double _textZoomFactor = 1.0;
+  double _textZoomFactor = 2.0;   // default; 2.0 displays as 100%
+  double _textBaselineZoom = 2.0; // "100 %" reference for text view
   double _pdfZoomFactor = 0.5;
   double _pdfBaselineZoom = 0.7; // "100%" reference, computed from screen width in initState
   final double _zoomStep = 0.1;
@@ -303,12 +304,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   int? _pendingJumpIndex;
   Timer? _pendingJumpTimer;
   bool _tocOpen = false;
-  bool _parametryOpen = false;
-  final LayerLink _parametryLayerLink = LayerLink();
-  OverlayEntry? _parametryOverlay;
   bool _speedOpen = false;
   final LayerLink _speedLayerLink = LayerLink();
   OverlayEntry? _speedOverlay;
+
+  // Auto speed increase feature
+  bool _autoSpeedIncrease = false;
+  int _wordsReadSinceSpeedIncrease = 0;
+  static const int _autoSpeedWordInterval = 650;
+  static const double _autoSpeedStep = 0.25;
 
   bool get _isTxtFile => widget.book.filePath.toLowerCase().endsWith('.txt');
   double get _currentZoomFactor => globalIsOriginalLayout ? _pdfZoomFactor : _textZoomFactor;
@@ -342,7 +346,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     // Load saved speed and PDF scroll listener
     SharedPreferences.getInstance().then((prefs) {
       final savedSpeed = prefs.getDouble('speed_${widget.book.id}');
-      if (savedSpeed != null && mounted) setState(() { _playbackSpeed = savedSpeed; });
+      final savedAutoSpeed = prefs.getBool('auto_speed_${widget.book.id}') ?? false;
+      if (mounted) setState(() {
+        if (savedSpeed != null) _playbackSpeed = savedSpeed;
+        _autoSpeedIncrease = savedAutoSpeed;
+      });
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _pdfVertScrollController.addListener(_onPdfScroll);
@@ -410,8 +418,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _positionSubscription?.cancel();
     _pendingJumpTimer?.cancel();
     _itemPositionsListener.itemPositions.removeListener(_scrollListener);
-    if (_pdfVertScrollController.hasListeners) _pdfVertScrollController.removeListener(_onPdfScroll);
-    if (_pdfHorizScrollController.hasListeners) _pdfHorizScrollController.removeListener(_onPdfScroll);
+    _pdfVertScrollController.removeListener(_onPdfScroll);
+    _pdfHorizScrollController.removeListener(_onPdfScroll);
     _highlightNotifier.dispose();
     _keyboardFocusNode.dispose();
     _transformationController.dispose();
@@ -426,7 +434,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (_chunksMetadata.isEmpty || _isParsingPdf || _isProgrammaticScrolling || globalIsOriginalLayout) return;
     final positions = _itemPositionsListener.itemPositions.value;
     if (positions.isEmpty) return;
-    bool currentVisible = positions.any((position) => position.index == _currentChunkIndex);
+    // Only flag user-scrolling if the current chunk has slipped out of view
+    // and we are not in the middle of a programmatic scroll
+    final bool currentVisible = positions.any((p) => p.index == _currentChunkIndex);
     if (!currentVisible && !_isUserScrolling) {
       setState(() { _isUserScrolling = true; });
     }
@@ -690,6 +700,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _handleTrackComplete() async {
+    if (_autoSpeedIncrease && _currentChunkIndex < _chunksMetadata.length) {
+      final words = _chunksMetadata[_currentChunkIndex].text.trim().split(RegExp(r'\s+')).length;
+      _wordsReadSinceSpeedIncrease += words;
+      if (_wordsReadSinceSpeedIncrease >= _autoSpeedWordInterval) {
+        _wordsReadSinceSpeedIncrease -= _autoSpeedWordInterval;
+        final newSpeed = (_playbackSpeed + _autoSpeedStep).clamp(0.5, 4.0);
+        if (newSpeed != _playbackSpeed) _changeSpeed(newSpeed);
+      }
+    }
     _currentWordIndex = 0;
     _currentChunkIndex++;
     _saveCurrentProgress();
@@ -853,8 +872,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   void _scrollToCurrentChunk(int index) {
     if (_chunksMetadata.isEmpty || index >= _chunksMetadata.length) return;
     if (globalIsOriginalLayout) {
-      if (_isUserScrolling || _isTxtFile || _renderedPages.isEmpty) return;
-      _isProgrammaticScrolling = true;
+      if (_isTxtFile || _renderedPages.isEmpty) return;
+      _isProgrammaticScrolling = true; // set before scheduling, not inside callback
       final chunk = _chunksMetadata[index];
 
       WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -877,7 +896,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             // Find the vertical centre of the first word in this chunk on its page
             double wordFracY = 0.1; // fallback: 10% down the page
             if (chunk.pdfWords.isNotEmpty) {
-              // pdfWords bounds are in PDF points; page height is chunk's page heightPt
               final targetRp = _renderedPages.firstWhere(
                     (rp) => rp.pageNumber == chunk.pageNumber,
                 orElse: () => _renderedPages.first,
@@ -897,38 +915,34 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                       orElse: () => _renderedPages.first,
                     ).widthPt);
 
-            // Word's absolute Y in the unscaled column, then scale and centre in viewport
             final double wordAbsY = pageTopY + (pageH * wordFracY);
             final double scaledWordY = wordAbsY * _pdfZoomFactor;
             final double scrollTarget = scaledWordY - (viewportH / 2);
 
-            _pdfVertScrollController.animateTo(
+            // Await the animation so _isProgrammaticScrolling stays true for its full duration
+            await _pdfVertScrollController.animateTo(
               scrollTarget.clamp(0.0, _pdfVertScrollController.position.maxScrollExtent),
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeInOutCubic,
             );
           }
         } catch (_) {}
-        _isProgrammaticScrolling = false;
+        if (mounted) _isProgrammaticScrolling = false;
       });
     } else {
-      if (_itemScrollController.isAttached && !_isUserScrolling) {
+      if (_itemScrollController.isAttached) {
         _isProgrammaticScrolling = true;
         _itemScrollController
             .scrollTo(index: index, alignment: 0.1, duration: const Duration(milliseconds: 250), curve: Curves.easeInOutCubic)
-            .then((_) => _isProgrammaticScrolling = false);
+            .then((_) { if (mounted) _isProgrammaticScrolling = false; });
       }
     }
   }
 
   void _recenterToCurrentChunk() {
-    _isProgrammaticScrolling = true; // prevent scroll listener from re-triggering
+    _isProgrammaticScrolling = true; // set immediately, before postFrameCallback gap
     setState(() { _isUserScrolling = false; });
     _scrollToCurrentChunk(_currentChunkIndex);
-    // Release lock after animation completes
-    Future.delayed(const Duration(milliseconds: 450), () {
-      _isProgrammaticScrolling = false;
-    });
   }
 
   void _startPdfReading() {
@@ -1007,7 +1021,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         if (rawText.isEmpty) { _skipToNextFailedChunk(); return; }
       }
       // Add a natural pause prefix for bullet-point chunks
-      if (TextSanitizer.isBulletLine(rawText)) rawText = '... ' + rawText;
+      if (TextSanitizer.isBulletLine(rawText)) rawText = '... $rawText';
 
       _scrollToCurrentChunk(_currentChunkIndex);
 
@@ -1015,14 +1029,25 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         setState(() { globalCurrentPdfPage = _chunksMetadata[_currentChunkIndex].pageNumber; });
       }
 
-      String? wavPath = _pregeneratedAudioCache[_currentChunkIndex];
+      // When skip flags are active, always regenerate rather than use cached wav
+      // (cached wav was generated from original text and would ignore skip settings)
+      final bool skipActive = _skipParentheses || _skipLinks || _skipPageNumbers;
+      String? wavPath = skipActive ? null : _pregeneratedAudioCache[_currentChunkIndex];
       if (wavPath == null) {
         if (rawText.trim().isEmpty || globalTts == null) {
           _skipToNextFailedChunk();
           return;
         }
         // Apply model dictionary at speak-time so cached chunks also benefit
-        final String ttsText = DictionaryJirka.apply(rawText);
+        String ttsText = rawText;
+        // Colon mid-sentence → period so intonation drops naturally
+        ttsText = ttsText.replaceAll(RegExp(r':\s+'), '. ');
+        // End-of-chunk colon (no following space) → period
+        ttsText = ttsText.replaceAll(RegExp(r':$'), '.');
+        // tzv. / Tzv. → takzvaně (must run before DictionaryJirka to avoid split chunks)
+        ttsText = ttsText.replaceAll(RegExp(r'\btzv\.\s*', caseSensitive: false), 'takzvaně ');
+        ttsText = ttsText.replaceAll(RegExp(r'\btzv$', caseSensitive: false), 'takzvaně');
+        ttsText = DictionaryJirka.apply(ttsText);
         final audio = globalTts!.generate(text: ttsText, sid: _selectedModel.sid);
         final tempDir = await getTemporaryDirectory();
         wavPath = p.join(tempDir.path, 'chunk_${_currentChunkIndex}_${DateTime.now().millisecondsSinceEpoch}.wav');
@@ -1034,6 +1059,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           await audioHandler.playFile(wavPath, rawText);
           await audioHandler.player.setSpeed(_playbackSpeed);
           await audioHandler.player.setVolume(_volume);
+          // Re-apply speed after a short delay in case playFile resets it
+          Future.delayed(const Duration(milliseconds: 80), () async {
+            if (mounted && _isBusy) await audioHandler.player.setSpeed(_playbackSpeed);
+          });
         } else {
           await windowsPlayer.setVolume(_volume);
           await windowsPlayer.setSpeed(_playbackSpeed);
@@ -1042,6 +1071,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           await Future.delayed(const Duration(milliseconds: 150));
           if (!mounted || !_isBusy) return;
           await windowsPlayer.play();
+          await windowsPlayer.setSpeed(_playbackSpeed);
         }
         _bufferNextChunkAsync(_currentChunkIndex + 1);
       }
@@ -1196,8 +1226,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       for (final chunk in _chunksMetadata) {
         final t = chunk.text.trim();
         final wordCount = t.split(' ').length;
-        final endsWithPunct = t.endsWith('.') || t.endsWith('?') || t.endsWith('!') || t.endsWith(':');
-        if (wordCount <= 6 && !endsWithPunct && t.length > 2) {
+        final endsWithPunct = t.endsWith('.') || t.endsWith('?') || t.endsWith('!');
+        final isBoldLabel = t.endsWith(':') && wordCount <= 10;
+        if (isBoldLabel) {
+          _chunkHeadingLevels.add(3);
+        } else if (wordCount <= 6 && !endsWithPunct && t.length > 2) {
           _chunkHeadingLevels.add(wordCount <= 3 ? 1 : 2);
         } else {
           _chunkHeadingLevels.add(0);
@@ -1224,12 +1257,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     for (int i = 0; i < _chunksMetadata.length; i++) {
       final h = avgHeights[i];
-      final wordCount = _chunksMetadata[i].text.trim().split(' ').length;
+      final text = _chunksMetadata[i].text.trim();
+      final wordCount = text.split(' ').length;
+      // Short phrase ending with ':' is a bold label/title — treat as h3 regardless of font size
+      final bool isBoldLabel = text.endsWith(':') && wordCount <= 10;
       if (h >= h1Threshold && wordCount <= 12) {
         _chunkHeadingLevels.add(1);
       } else if (h >= h2Threshold && wordCount <= 14) {
         _chunkHeadingLevels.add(2);
-      } else if (h >= h3Threshold && wordCount <= 16) {
+      } else if ((h >= h3Threshold && wordCount <= 16) || isBoldLabel) {
         _chunkHeadingLevels.add(3);
       } else {
         _chunkHeadingLevels.add(0);
@@ -1272,9 +1308,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       setState(() {
         _selectedChunkIndex = chunkIndex;
         _pendingJumpIndex = null;
+        _isUserScrolling = false; // allow programmatic scroll in both layout modes
       });
       if (globalIsOriginalLayout && !_isTxtFile) {
-        _isUserScrolling = false;
         _scrollToCurrentChunk(chunkIndex);
       } else {
         if (_itemScrollController.isAttached) {
@@ -1283,7 +1319,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               .scrollTo(index: chunkIndex, alignment: 0.2,
               duration: const Duration(milliseconds: 350),
               curve: Curves.easeInOutCubic)
-              .then((_) => _isProgrammaticScrolling = false);
+              .then((_) { if (mounted) _isProgrammaticScrolling = false; });
         }
       }
     });
@@ -1292,6 +1328,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   Widget _buildTocButton(BuildContext context) {
     final entries = _tocEntries;
     if (entries.isEmpty) return const SizedBox.shrink();
+
+    // Find which list index corresponds to the active chapter
+    final int activeListIndex = entries.indexWhere((e) => e.index == _activeChapterIndex);
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1305,61 +1345,86 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           child: const Icon(Icons.format_list_bulleted_rounded),
         ),
         if (_tocOpen)
-          Container(
-            constraints: const BoxConstraints(maxWidth: 280, maxHeight: 320),
-            margin: const EdgeInsets.only(top: 6),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 16, offset: const Offset(0, 4))],
-              border: Border.all(color: Colors.grey.shade200),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: ListView.builder(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                shrinkWrap: true,
-                itemCount: entries.length,
-                itemBuilder: (ctx, i) {
-                  final e = entries[i];
-                  final bool isPending = e.index == _pendingJumpIndex;
-                  final bool isActiveChapter = e.index == _activeChapterIndex;
-                  return InkWell(
-                    onTap: () => _previewThenJump(e.index),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 150),
-                      color: isPending ? Colors.orange.shade50 : isActiveChapter ? Theme.of(ctx).colorScheme.primaryContainer.withOpacity(0.25) : Colors.transparent,
-                      padding: EdgeInsets.fromLTRB(12.0 + (e.level - 1) * 10.0, 8, 12, 8),
-                      child: Row(children: [
-                        Container(
-                          width: 2.5, height: 14,
-                          margin: const EdgeInsets.only(right: 8),
-                          decoration: BoxDecoration(
-                            color: e.level == 1
-                                ? Theme.of(ctx).colorScheme.primary
-                                : e.level == 2
-                                ? Theme.of(ctx).colorScheme.primary.withOpacity(0.55)
-                                : Theme.of(ctx).colorScheme.primary.withOpacity(0.3),
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                        Expanded(child: Text(
-                          e.text,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: e.level == 1 ? 13 : 12,
-                            fontWeight: e.level == 1 ? FontWeight.w700 : FontWeight.w500,
-                            color: isActiveChapter ? Theme.of(ctx).colorScheme.primary : Colors.black87,
-                          ),
-                        )),
-                      ]),
-                    ),
-                  );
-                },
+          Builder(builder: (ctx) {
+            final sc = ScrollController();
+            // Scroll to active item after the list is laid out
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!sc.hasClients || activeListIndex < 0) return;
+              const itemH = 42.0;
+              final maxScroll = sc.position.maxScrollExtent;
+              final target = (activeListIndex * itemH - 100).clamp(0.0, maxScroll);
+              sc.animateTo(target, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+            });
+            return Container(
+              constraints: const BoxConstraints(maxWidth: 280, maxHeight: 320),
+              margin: const EdgeInsets.only(top: 6),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 16, offset: const Offset(0, 4))],
+                border: Border.all(color: Colors.grey.shade200),
               ),
-            ),
-          ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: ListView.builder(
+                  controller: sc,
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  shrinkWrap: true,
+                  itemCount: entries.length,
+                  itemBuilder: (ctx, i) {
+                    final e = entries[i];
+                    final bool isPending = e.index == _pendingJumpIndex;
+                    final bool isActiveChapter = e.index == _activeChapterIndex;
+                    return InkWell(
+                      onTap: () => _previewThenJump(e.index),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 150),
+                        color: isPending
+                            ? Colors.orange.shade50
+                            : isActiveChapter
+                            ? Theme.of(ctx).colorScheme.primary.withOpacity(0.1)
+                            : Colors.transparent,
+                        padding: EdgeInsets.fromLTRB(12.0 + (e.level - 1) * 10.0, 9, 12, 9),
+                        child: Row(children: [
+                          Container(
+                            width: isActiveChapter ? 3.5 : 2.5,
+                            height: 14,
+                            margin: const EdgeInsets.only(right: 8),
+                            decoration: BoxDecoration(
+                              color: isActiveChapter
+                                  ? Theme.of(ctx).colorScheme.primary
+                                  : e.level == 1
+                                  ? Theme.of(ctx).colorScheme.primary
+                                  : e.level == 2
+                                  ? Theme.of(ctx).colorScheme.primary.withOpacity(0.55)
+                                  : Theme.of(ctx).colorScheme.primary.withOpacity(0.3),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                          Expanded(child: Text(
+                            e.text,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: e.level == 1 ? 13 : 12,
+                              fontWeight: isActiveChapter
+                                  ? FontWeight.w800
+                                  : e.level == 1 ? FontWeight.w700 : FontWeight.w500,
+                              color: isActiveChapter
+                                  ? Theme.of(ctx).colorScheme.primary
+                                  : Colors.black87,
+                            ),
+                          )),
+                          if (isActiveChapter)
+                            Icon(Icons.volume_up_rounded, size: 12, color: Theme.of(ctx).colorScheme.primary),
+                        ]),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            );
+          }),
       ],
     );
   }
@@ -1390,89 +1455,99 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
         return Listener(
           onPointerSignal: _handlePointerSignal,
-          child: Container(
-            color: const Color(0xFF3A3A3A),
-            child: RawScrollbar(
-              controller: _pdfVertScrollController,
-              thumbVisibility: true,
-              trackVisibility: true,
-              thumbColor: Colors.white38,
-              trackColor: Colors.white12,
-              radius: const Radius.circular(4),
-              thickness: 8,
+          child: NotificationListener<ScrollStartNotification>(
+            onNotification: (n) {
+              // dragDetails is non-null only for touch/pointer-initiated scrolls
+              if (n.dragDetails != null && !_isUserScrolling) {
+                setState(() { _isUserScrolling = true; });
+                _isProgrammaticScrolling = false; // user took over
+              }
+              return false;
+            },
+            child: Container(
+              color: const Color(0xFF3A3A3A),
               child: RawScrollbar(
-                controller: _pdfHorizScrollController,
-                thumbVisibility: needsHorizScroll,
-                trackVisibility: needsHorizScroll,
+                controller: _pdfVertScrollController,
+                thumbVisibility: true,
+                trackVisibility: true,
                 thumbColor: Colors.white38,
                 trackColor: Colors.white12,
                 radius: const Radius.circular(4),
                 thickness: 8,
-                notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
-                child: SingleChildScrollView(
-                  controller: _pdfVertScrollController,
-                  physics: const ClampingScrollPhysics(),
+                child: RawScrollbar(
+                  controller: _pdfHorizScrollController,
+                  thumbVisibility: needsHorizScroll,
+                  trackVisibility: needsHorizScroll,
+                  thumbColor: Colors.white38,
+                  trackColor: Colors.white12,
+                  radius: const Radius.circular(4),
+                  thickness: 8,
+                  notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
                   child: SingleChildScrollView(
-                    controller: _pdfHorizScrollController,
-                    scrollDirection: Axis.horizontal,
-                    physics: needsHorizScroll
-                        ? const ClampingScrollPhysics()
-                        : const NeverScrollableScrollPhysics(),
-                    child: SizedBox(
-                      width: needsHorizScroll ? scaledW : availableWidth,
-                      height: (totalContentHeight * _pdfZoomFactor).clamp(availableHeight, double.infinity),
-                      child: _renderedPages.isEmpty
-                          ? const Center(
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
-                      )
-                          : Align(
-                        alignment: Alignment.topCenter,
-                        child: Transform.scale(
-                          scale: _pdfZoomFactor,
+                    controller: _pdfVertScrollController,
+                    physics: const ClampingScrollPhysics(),
+                    child: SingleChildScrollView(
+                      controller: _pdfHorizScrollController,
+                      scrollDirection: Axis.horizontal,
+                      physics: needsHorizScroll
+                          ? const ClampingScrollPhysics()
+                          : const NeverScrollableScrollPhysics(),
+                      child: SizedBox(
+                        width: needsHorizScroll ? scaledW : availableWidth,
+                        height: (totalContentHeight * _pdfZoomFactor).clamp(availableHeight, double.infinity),
+                        child: _renderedPages.isEmpty
+                            ? const Center(
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
+                        )
+                            : Align(
                           alignment: Alignment.topCenter,
-                          child: SizedBox(
-                            width: availableWidth,
-                            height: totalContentHeight,
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                const SizedBox(height: 16),
-                                for (final renderedPage in _renderedPages)
-                                  Padding(
-                                    padding: const EdgeInsets.only(bottom: pageGap),
-                                    child: Container(
-                                      margin: const EdgeInsets.symmetric(horizontal: 48.0),
-                                      decoration: BoxDecoration(
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withOpacity(0.5),
-                                            blurRadius: 18,
-                                            spreadRadius: 2,
-                                            offset: const Offset(0, 4),
-                                          ),
-                                        ],
-                                      ),
-                                      child: PdfPageWidget(
-                                        page: renderedPage,
-                                        displayWidth: displayWidth,
-                                        chunks: _chunksMetadata,
-                                        currentChunkIndex: _currentChunkIndex,
-                                        currentWordIndex: _currentWordIndex,
-                                        pendingChunkIndex: _pendingJumpIndex,
-                                        isBusy: _isBusy,
-                                        primaryColor: Theme.of(context).colorScheme.primary,
-                                        onTap: (ci, wi) {
-                                          setState(() {
-                                            _pendingJumpIndex = ci;
-                                            _selectedChunkIndex = ci;
-                                          });
-                                        },
+                          child: Transform.scale(
+                            scale: _pdfZoomFactor,
+                            alignment: Alignment.topCenter,
+                            child: SizedBox(
+                              width: availableWidth,
+                              height: totalContentHeight,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  const SizedBox(height: 16),
+                                  for (final renderedPage in _renderedPages)
+                                    Padding(
+                                      padding: const EdgeInsets.only(bottom: pageGap),
+                                      child: Container(
+                                        margin: const EdgeInsets.symmetric(horizontal: 48.0),
+                                        decoration: BoxDecoration(
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black.withOpacity(0.5),
+                                              blurRadius: 18,
+                                              spreadRadius: 2,
+                                              offset: const Offset(0, 4),
+                                            ),
+                                          ],
+                                        ),
+                                        child: PdfPageWidget(
+                                          page: renderedPage,
+                                          displayWidth: displayWidth,
+                                          chunks: _chunksMetadata,
+                                          currentChunkIndex: _currentChunkIndex,
+                                          currentWordIndex: _currentWordIndex,
+                                          pendingChunkIndex: _pendingJumpIndex,
+                                          isBusy: _isBusy,
+                                          primaryColor: Theme.of(context).colorScheme.primary,
+                                          onTap: (ci, wi) {
+                                            setState(() {
+                                              _pendingJumpIndex = ci;
+                                              _selectedChunkIndex = ci;
+                                            });
+                                          },
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                const SizedBox(height: 16),
-                              ],
+                                  const SizedBox(height: 16),
+                                ],
+                              ),
                             ),
                           ),
                         ),
@@ -1487,7 +1562,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       },
     );
   }
-
 
   Widget _buildSpeedButton(BuildContext context) {
     final spd = _playbackSpeed;
@@ -1528,15 +1602,19 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _speedOpen = true;
     if (mounted) setState(() {});
 
-    const List<({double spd, bool popular})> speeds = [
-      (spd: 0.5, popular: false), (spd: 0.75, popular: false), (spd: 1.0, popular: true),
-      (spd: 1.25, popular: true), (spd: 1.5, popular: true), (spd: 1.75, popular: false),
-      (spd: 2.0, popular: true), (spd: 2.5, popular: false), (spd: 3.0, popular: true),
-    ];
-
     _speedOverlay = OverlayEntry(builder: (ctx) {
+      const List<double> allSpeeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0];
+      const double rangeMin = 0.5;
+      const double rangeMax = 4.0;
+      const double chipH = 28.0;
+      const double chipGap = 5.0;
+      // 11 chips, 10 gaps — avoid allSpeeds.length in const expression
+      const double chipsAreaH = 11 * chipH + 10 * chipGap;
+      const double thumbR = 8.0;
+
+      double fracFor(double spd) => ((spd - rangeMin) / (rangeMax - rangeMin)).clamp(0.0, 1.0);
+
       return Stack(children: [
-        // Transparent barrier — tap anywhere to close
         Positioned.fill(child: GestureDetector(
           behavior: HitTestBehavior.translucent,
           onTap: _closeSpeedOverlay,
@@ -1550,24 +1628,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           child: Material(
             color: Colors.transparent,
             child: StatefulBuilder(builder: (_, setLocal) {
-              // Popular speed positions along the 0.5–3.0 range (fraction 0..1 = bottom..top)
-              // Range span = 2.5. Popular speeds: 1.0, 1.25, 1.5, 2.0, 3.0
-              const double rangeMin = 0.5;
-              const double rangeMax = 3.0;
-              const double rangeSpan = rangeMax - rangeMin;
-              const double panelH = 220.0;
-              const double thumbR = 9.0;
-              const double trackTop = thumbR;
-              const double trackBottom = panelH - thumbR;
-              const double trackH = trackBottom - trackTop;
-
-              double fracFor(double spd) => ((spd - rangeMin) / rangeSpan).clamp(0.0, 1.0);
-              // y=0 is top of panel → higher speed = lower y
-              double yFor(double spd) => trackTop + (1.0 - fracFor(spd)) * trackH;
-
               return Container(
-                width: 120,
-                constraints: const BoxConstraints(minHeight: 260),
+                width: 148,
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(14),
@@ -1575,78 +1637,120 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   border: Border.all(color: Colors.grey.shade200),
                 ),
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  // Header
+                  // Header — label only
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+                    padding: const EdgeInsets.fromLTRB(11, 10, 11, 8),
                     child: Row(children: [
-                      const Icon(Icons.speed_rounded, size: 14, color: Color(0xFF5F6368)),
-                      const SizedBox(width: 4),
-                      Text(_playbackSpeed % 1 == 0 ? '${_playbackSpeed.toInt()}x' : '${_playbackSpeed}x',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF1F1F1F))),
+                      const Icon(Icons.speed_rounded, size: 13, color: Color(0xFF5F6368)),
+                      const SizedBox(width: 5),
+                      const Text('Rychlost čtení',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F))),
                     ]),
                   ),
                   const Divider(height: 1, thickness: 0.5),
-                  // Vertical slider + speed chip labels
-                  SizedBox(
-                    height: panelH,
-                    child: Stack(clipBehavior: Clip.none, children: [
-                      // Slider column (left side)
-                      Positioned(
-                        left: 14, top: 0, bottom: 0, width: 40,
-                        child: RotatedBox(
-                          quarterTurns: 3,
-                          child: SliderTheme(
-                            data: SliderThemeData(
-                              trackHeight: 3,
-                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: thumbR),
-                              overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
-                              activeTrackColor: const Color(0xFF1A73E8),
-                              thumbColor: const Color(0xFF1A73E8),
-                              inactiveTrackColor: Colors.grey.shade200,
-                              overlayColor: const Color(0xFF1A73E8).withOpacity(0.15),
-                            ),
-                            child: Slider(
-                              value: _playbackSpeed.clamp(rangeMin, rangeMax),
-                              min: rangeMin, max: rangeMax, divisions: 20,
-                              onChanged: (v) {
-                                final snapped = (v * 4).round() / 4.0;
-                                _changeSpeed(snapped);
-                                setLocal(() {});
-                              },
+                  // Slider + chips
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+                    child: SizedBox(
+                      height: chipsAreaH,
+                      child: Stack(clipBehavior: Clip.none, children: [
+                        // Vertical slider on the left
+                        Positioned(
+                          left: 0, top: 0, bottom: 0, width: 44,
+                          child: RotatedBox(
+                            quarterTurns: 3,
+                            child: SliderTheme(
+                              data: SliderThemeData(
+                                trackHeight: 3,
+                                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: thumbR),
+                                overlayShape: const RoundSliderOverlayShape(overlayRadius: 15),
+                                activeTrackColor: const Color(0xFF1A73E8),
+                                thumbColor: const Color(0xFF1A73E8),
+                                inactiveTrackColor: Colors.grey.shade200,
+                                overlayColor: const Color(0xFF1A73E8).withOpacity(0.15),
+                              ),
+                              child: Slider(
+                                value: _playbackSpeed.clamp(rangeMin, rangeMax),
+                                min: rangeMin, max: rangeMax, divisions: 28,
+                                onChanged: (v) {
+                                  final snapped = (v * 4).round() / 4.0;
+                                  _changeSpeed(snapped);
+                                  setLocal(() {});
+                                },
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      // Popular speed chips — right side, aligned to slider positions
-                      for (final e in speeds.where((s) => s.popular))
-                        Positioned(
-                          right: 6,
-                          top: yFor(e.spd) - 13,
-                          child: GestureDetector(
-                            onTap: () { _changeSpeed(e.spd); setLocal(() {}); },
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 120),
-                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: (_playbackSpeed - e.spd).abs() < 0.01
-                                    ? const Color(0xFF1A73E8)
-                                    : const Color(0xFFF1F3F4),
-                                borderRadius: BorderRadius.circular(6),
-                                border: (_playbackSpeed - e.spd).abs() < 0.01
-                                    ? null
-                                    : Border.all(color: Colors.grey.shade300),
-                              ),
-                              child: Text(
-                                e.spd % 1 == 0 ? '${e.spd.toInt()}x' : '${e.spd}x',
-                                style: TextStyle(
-                                  fontSize: 11, fontWeight: FontWeight.w700,
-                                  color: (_playbackSpeed - e.spd).abs() < 0.01 ? Colors.white : Colors.black87,
+                        // Speed chips — evenly spaced, fastest at top
+                        for (int i = 0; i < allSpeeds.length; i++)
+                          Builder(builder: (_) {
+                            final spd = allSpeeds[allSpeeds.length - 1 - i];
+                            final bool active = (_playbackSpeed - spd).abs() < 0.01;
+                            return Positioned(
+                              right: 0, top: i * (chipH + chipGap),
+                              width: 90, height: chipH,
+                              child: GestureDetector(
+                                onTap: () { _changeSpeed(spd); setLocal(() {}); },
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 100),
+                                  decoration: BoxDecoration(
+                                    color: active ? const Color(0xFF1A73E8) : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(7),
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    spd % 1 == 0 ? '${spd.toInt()}x' : '${spd}x',
+                                    style: TextStyle(
+                                      fontSize: 12, fontWeight: FontWeight.w700,
+                                      color: active ? Colors.white : Colors.black87,
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
+                            );
+                          }),
+                      ]),
+                    ),
+                  ),
+                  const Divider(height: 1, thickness: 0.5),
+                  // Auto-speed-increase toggle
+                  InkWell(
+                    borderRadius: const BorderRadius.vertical(bottom: Radius.circular(14)),
+                    onTap: () {
+                      _autoSpeedIncrease = !_autoSpeedIncrease;
+                      _wordsReadSinceSpeedIncrease = 0;
+                      SharedPreferences.getInstance().then(
+                              (p) => p.setBool('auto_speed_${widget.book.id}', _autoSpeedIncrease));
+                      setLocal(() {});
+                      setState(() {});
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
+                      child: Row(children: [
+                        SizedBox(
+                          width: 20, height: 20,
+                          child: Radio<bool>(
+                            value: true,
+                            groupValue: _autoSpeedIncrease,
+                            onChanged: (_) {
+                              _autoSpeedIncrease = !_autoSpeedIncrease;
+                              _wordsReadSinceSpeedIncrease = 0;
+                              SharedPreferences.getInstance().then(
+                                      (p) => p.setBool('auto_speed_${widget.book.id}', _autoSpeedIncrease));
+                              setLocal(() {});
+                              setState(() {});
+                            },
+                            activeColor: const Color(0xFF1A73E8),
+                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           ),
                         ),
-                    ]),
+                        const SizedBox(width: 6),
+                        const Expanded(
+                          child: Text('Zvýšit rychlost\nkaždých 650 slov',
+                              style: TextStyle(fontSize: 10, height: 1.35, fontWeight: FontWeight.w500, color: Color(0xFF3C4043))),
+                        ),
+                      ]),
+                    ),
                   ),
                 ]),
               );
@@ -1853,7 +1957,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                       constraints: const BoxConstraints(minWidth: 36),
                       alignment: Alignment.center,
                       child: Text(
-                        '${((_currentZoomFactor / _pdfBaselineZoom) * 100).toStringAsFixed(0)}%',
+                        '${((_currentZoomFactor / (globalIsOriginalLayout ? _pdfBaselineZoom : _textBaselineZoom)) * 100).toStringAsFixed(0)}%',
                         style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.w700),
                       ),
                     ),
@@ -1876,13 +1980,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         if (v == 'parentheses') _skipParentheses = !_skipParentheses;
                         else if (v == 'links') _skipLinks = !_skipLinks;
                         else if (v == 'pages') _skipPageNumbers = !_skipPageNumbers;
+                        // Invalidate pre-buffered audio so next chunks regenerate with new settings
+                        _pregeneratedAudioCache.clear();
                       });
                     }
                     PopupMenuEntry<String> row(String val, bool active, String label, Color dot) =>
                         PopupMenuItem<String>(
                           value: val, height: 40,
                           onTap: () => toggle(val),
-                          child: StatefulBuilder(builder: (_, setRow) => Row(children: [
+                          child: Row(children: [
                             Container(width: 4, height: 22, margin: const EdgeInsets.only(right: 6),
                                 decoration: BoxDecoration(
                                     color: active ? dot : Colors.grey.shade200,
@@ -1893,7 +1999,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                             )),
                             const SizedBox(width: 6),
                             Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                          ])),
+                          ]),
                         );
                     return <PopupMenuEntry<String>>[
                       row('parentheses', _skipParentheses, 'Přeskočit závorky', Colors.purple.shade400),
@@ -2192,8 +2298,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         Text(
                             isCompleted ? 'Hotovo'
                                 : (globalIsOriginalLayout && !_isTxtFile
-                                ? 'str.\u00A0$globalCurrentPdfPage/$globalTotalPdfPages'
-                                : 'bl.\u00A0${_currentChunkIndex + 1}/${_chunksMetadata.length}'),
+                                ? 'Strana\u00A0$globalCurrentPdfPage/$globalTotalPdfPages'
+                                : 'Blok\u00A0${_currentChunkIndex + 1}/${_chunksMetadata.length}'),
                             style: const TextStyle(fontSize: 10, color: Color(0xFF5F6368), fontWeight: FontWeight.w600)),
                       ])),
                       // Center: controls

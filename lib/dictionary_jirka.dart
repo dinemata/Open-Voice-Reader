@@ -24,6 +24,7 @@ class DictionaryJirka {
     (RegExp(r'\btj\.\s', caseSensitive: false), 'to jest '),
     (RegExp(r'\batd\.\s', caseSensitive: false), 'a tak dále '),
     (RegExp(r'\bapod\.\s', caseSensitive: false), 'a podobně '),
+    (RegExp(r'\btzv\.\s', caseSensitive: false), 'takzvaně '),
     (RegExp(r'\bstr\.\s', caseSensitive: false), 'strana '),
     (RegExp(r'\bkap\.\s', caseSensitive: false), 'kapitola '),
     (RegExp(r'\bdr\.\s', caseSensitive: false), 'doktor '),
