@@ -317,7 +317,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _skipToNextChunk() async {
-    if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
+    if (Platform.isAndroid || Platform.isIOS) {
+      await audioHandler.stop();
+    } else {
+      await windowsPlayer.stop();
+    }
     setState(() {
       globalCurrentChunkIndex++;
       globalCurrentWordIndex = 0;
@@ -354,7 +358,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _restartAudioFromBeginning() async {
-    if (Platform.isAndroid || Platform.isIOS) await audioHandler.stop(); else await windowsPlayer.stop();
+    if (Platform.isAndroid || Platform.isIOS) {
+      await audioHandler.stop();
+    } else {
+      await windowsPlayer.stop();
+    }
     setState(() {
       globalIsAudioBusy = true;
       globalCurrentChunkIndex = 0;
@@ -513,7 +521,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 color: Colors.white,
                                 borderRadius: BorderRadius.circular(16),
                                 border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
-                                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 2))],
+                                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 8, offset: const Offset(0, 2))],
                               ),
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(16),
@@ -542,7 +550,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                               top: 8, left: 8,
                                               child: Container(
                                                 padding: const EdgeInsets.all(6),
-                                                decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), borderRadius: BorderRadius.circular(8)),
+                                                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.9), borderRadius: BorderRadius.circular(8)),
                                                 child: Icon(
                                                   isTxt ? Icons.description_rounded : Icons.picture_as_pdf_rounded,
                                                   color: exists ? (isTxt ? Colors.blue.shade700 : Colors.red.shade600) : Colors.grey,
@@ -562,7 +570,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                             Positioned(
                                               top: 8, right: 8,
                                               child: Container(
-                                                decoration: BoxDecoration(color: Colors.white.withOpacity(0.9), shape: BoxShape.circle),
+                                                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.9), shape: BoxShape.circle),
                                                 child: PopupMenuButton<String>(
                                                   padding: EdgeInsets.zero,
                                                   constraints: const BoxConstraints(),
@@ -638,7 +646,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         decoration: BoxDecoration(
           color: Colors.white,
           border: Border(top: BorderSide(color: Colors.grey.shade200, width: 1)),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 10, offset: const Offset(0, -3))],
+          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, -3))],
         ),
         child: SafeArea(
           child: Column(
@@ -709,11 +717,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                   globalIsAudioBusy = !globalIsAudioBusy;
                                 });
                                 if (!globalIsAudioBusy) {
-                                  if (Platform.isAndroid || Platform.isIOS) audioHandler.stop(); else windowsPlayer.stop();
+                                  if (Platform.isAndroid || Platform.isIOS) {
+                                    audioHandler.stop();
+                                  } else {
+                                    windowsPlayer.stop();
+                                  }
                                 } else {
                                   final file = File(activeBook!.filePath);
                                   if (file.existsSync()) {
-                                    if (Platform.isAndroid || Platform.isIOS) audioHandler.play(); else windowsPlayer.play();
+                                    if (Platform.isAndroid || Platform.isIOS) {
+                                      audioHandler.play();
+                                    } else {
+                                      windowsPlayer.play();
+                                    }
                                   }
                                 }
                               },

@@ -151,10 +151,10 @@ class PdfHighlightPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final sentencePaint = Paint()..color = primaryColor.withOpacity(0.15)..style = PaintingStyle.fill;
+    final sentencePaint = Paint()..color = primaryColor.withValues(alpha: 0.15)..style = PaintingStyle.fill;
     for (final rect in sentenceRects) { canvas.drawRect(rect, sentencePaint); }
     if (wordRect != null) {
-      final wordPaint = Paint()..color = primaryColor.withOpacity(0.35)..style = PaintingStyle.fill;
+      final wordPaint = Paint()..color = primaryColor.withValues(alpha: 0.35)..style = PaintingStyle.fill;
       canvas.drawRect(wordRect!, wordPaint);
     }
   }
