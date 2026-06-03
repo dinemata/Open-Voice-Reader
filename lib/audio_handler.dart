@@ -24,7 +24,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
     try {
       mediaItem.add(MediaItem(
         id: path,
-        album: "free_voice_reader",
+        album: "Open Voice Reader",
         title: title,
         artist: "AI Hlas",
       ));

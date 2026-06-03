@@ -387,49 +387,39 @@ class _VerticalSliderPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final double w = size.width;
     final double h = size.height;
-    final double thumbR = w / 2; // thumb = full width semicircle
-    final double trackTop = thumbR;
-    final double trackBottom = h - thumbR;
-    final double trackH = trackBottom - trackTop;
+    final double radius = w / 2;
+    final double frac = fraction;
+    final double filledH = frac * h;
 
-    // Full-width pill background
-    final pillRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(0, 0, w, h),
-      Radius.circular(w / 2),
-    );
-    canvas.drawRRect(pillRect, Paint()..color = inactiveColor);
+    final pillRect = RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, w, h), Radius.circular(radius));
 
-    // Active fill from bottom up to thumb
-    final double thumbY = trackTop + (1.0 - fraction) * trackH;
-    if (thumbY < h) {
+    // Background — dark grey, works in both light and dark mode
+    canvas.drawRRect(pillRect, Paint()..color = const Color(0xFFCCCCCC));
+
+    // Active fill from bottom
+    if (filledH > 0) {
       canvas.save();
       canvas.clipRRect(pillRect);
-      canvas.drawRect(Rect.fromLTRB(0, thumbY, w, h), Paint()..color = activeColor);
+      canvas.drawRect(Rect.fromLTWH(0, h - filledH, w, filledH), Paint()..color = activeColor);
       canvas.restore();
     }
 
-    // Tick marks — horizontal lines across full width inside pill
-    const int steps = 70; // every 0.05x
-    const int majorEvery = 10; // every 0.5x
-    for (int i = 1; i < steps; i++) {
-      final double frac = i / steps;
-      final double y = trackTop + (1.0 - frac) * trackH;
-      final bool isMajor = i % majorEvery == 0;
-      final double inset = isMajor ? 2.0 : 8.0;
-      final bool isActive = frac <= fraction;
+    // Sparse tick lines — only every 0.25x (every 5 steps), 14 total
+    const int totalSteps = 70;
+    for (int i = 5; i < totalSteps; i += 5) {
+      final bool isMajor = i % 20 == 0; // every 1.0x
+      final double tickFrac = i / totalSteps;
+      final double y = h - tickFrac * h;
+      final double inset = isMajor ? 3.0 : w * 0.22;
+      final bool isActive = tickFrac <= frac;
       final Color tickColor = isActive
-          ? Colors.white.withValues(alpha: isMajor ? 0.85 : 0.45)
-          : Colors.grey.withValues(alpha: isMajor ? 0.45 : 0.22);
+          ? Colors.white.withValues(alpha: isMajor ? 0.80 : 0.45)
+          : const Color(0xFF888888).withValues(alpha: isMajor ? 0.55 : 0.30);
       canvas.drawLine(
-        Offset(inset, y),
-        Offset(w - inset, y),
-        Paint()
-          ..color = tickColor
-          ..strokeWidth = isMajor ? 1.5 : 1.0
-          ..strokeCap = StrokeCap.round,
+        Offset(inset, y), Offset(w - inset, y),
+        Paint()..color = tickColor..strokeWidth = isMajor ? 1.5 : 1.0..strokeCap = StrokeCap.round,
       );
     }
-    // No visible thumb — touch target is the whole pill widget
   }
 
   @override
@@ -618,14 +608,17 @@ class AudioPlayerBar extends StatelessWidget {
     required this.onVolumeChanged,
     required this.speedLayerLink,
     required this.onSpeedTap,
+    this.isDark = false,
   });
 
   final void Function(BuildContext) onSpeedTap;
+  final bool isDark;
 
   @override
   Widget build(BuildContext context) {
     final screenW = MediaQuery.of(context).size.width;
     final isPhone = screenW < 480;
+    final progressBg = isDark ? const Color(0xFF3A3A3A) : Colors.grey.shade200;
 
     return Column(mainAxisSize: MainAxisSize.min, children: [
       // Progress bar
@@ -633,7 +626,7 @@ class AudioPlayerBar extends StatelessWidget {
         borderRadius: BorderRadius.circular(3),
         child: LinearProgressIndicator(
           value: progress,
-          backgroundColor: Colors.grey.shade200,
+          backgroundColor: progressBg,
           color: Theme.of(context).colorScheme.primary,
           minHeight: 4,
         ),
@@ -695,12 +688,21 @@ class AudioPlayerBar extends StatelessWidget {
                     child: const Icon(Icons.skip_next_rounded, color: Colors.white, size: 28),
                   )
                       : (isCompleted
-                      ? const Icon(Icons.replay_rounded, color: Color(0xFF1A73E8), size: 44)
-                      : Icon(
-                    isBusy ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded,
-                    color: isBusy ? Colors.red.shade600 : const Color(0xFF1A73E8),
-                    size: 44,
-                  )),
+                      ? Icon(Icons.replay_rounded, color: isDark ? Colors.white : const Color(0xFF1A73E8), size: 44)
+                      : Stack(alignment: Alignment.center, children: [
+                    Container(
+                      width: 44, height: 44,
+                      decoration: BoxDecoration(
+                        color: isBusy ? Colors.red.shade600 : const Color(0xFF1A73E8),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    Icon(
+                      isBusy ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                      color: Colors.white,
+                      size: 26,
+                    ),
+                  ])),
                 ),
               ),
             ),
@@ -724,17 +726,19 @@ class AudioPlayerBar extends StatelessWidget {
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
                     decoration: BoxDecoration(
-                      color: speedOpen ? const Color(0xFF1A73E8) : const Color(0xFFF1F3F4),
+                      color: speedOpen
+                          ? const Color(0xFF1A73E8)
+                          : (isDark ? const Color(0xFF2C2C2C) : const Color(0xFFF1F3F4)),
                       borderRadius: BorderRadius.circular(7),
                     ),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
                       Icon(Icons.speed_rounded, size: 15,
-                          color: speedOpen ? Colors.white : const Color(0xFF5F6368)),
+                          color: speedOpen ? Colors.white : (isDark ? Colors.white70 : const Color(0xFF5F6368))),
                       const SizedBox(width: 3),
                       Text(
                         playbackSpeed % 1 == 0 ? '${playbackSpeed.toInt()}x' : '${playbackSpeed}x',
                         style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
-                            color: speedOpen ? Colors.white : const Color(0xFF1F1F1F)),
+                            color: speedOpen ? Colors.white : (isDark ? Colors.white : const Color(0xFF1F1F1F))),
                       ),
                     ]),
                   ),
@@ -817,8 +821,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   bool _skipLinks = false;
   bool _skipPageNumbers = false;
   bool _skipSuperscripts = false;
-  // Dark mode: 0=system, 1=light, 2=dark
-  int _themeMode = 0;
 
   double _textZoomFactor = 1.0;   // default; baseline 1.0 displays as 100%
   double _textBaselineZoom = 1.0; // "100 %" reference for text view
@@ -876,8 +878,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   double get _currentZoomFactor => globalIsOriginalLayout ? _pdfZoomFactor : _textZoomFactor;
   List<ModelConfig> get _filteredModels => availableModels.where((m) => m.id != _selectedModel.id).toList();
   bool get _isDark {
-    if (_themeMode == 2) return true;
-    if (_themeMode == 1) return false;
+    final mode = appThemeNotifier.value;
+    if (mode == 2) return true;
+    if (mode == 1) return false;
     return WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark;
   }
 
@@ -911,11 +914,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     SharedPreferences.getInstance().then((prefs) {
       final savedSpeed = prefs.getDouble('speed_${widget.book.id}');
       final savedAutoSpeed = prefs.getBool('auto_speed_${widget.book.id}') ?? false;
-      final savedTheme = prefs.getInt('theme_mode') ?? 0;
       if (mounted) setState(() {
         if (savedSpeed != null) _playbackSpeed = savedSpeed;
         _autoSpeedIncrease = savedAutoSpeed;
-        _themeMode = savedTheme;
       });
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2128,7 +2129,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     final titleRow = Row(children: [
       const SizedBox(width: 4),
       TextButton.icon(
-        style: TextButton.styleFrom(foregroundColor: Colors.black87),
+        style: TextButton.styleFrom(foregroundColor: _isDark ? Colors.white70 : Colors.black87),
         onPressed: _handlePopAction,
         icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 14),
         label: const Text('Zpět', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -2141,7 +2142,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
             child: Text(widget.book.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1F1F1F))),
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: _isDark ? Colors.white : const Color(0xFF1F1F1F))),
           ),
         ),
       ),
@@ -2149,7 +2150,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       if (!_isParsingPdf) ...[
         Container(
           height: 36, constraints: const BoxConstraints(maxWidth: 160),
-          decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(8)),
+          decoration: BoxDecoration(color: _isDark ? const Color(0xFF1A3A6E) : const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(8)),
           child: PopupMenuButton<ModelConfig>(
             enabled: !_isBusy && _isReady,
             offset: const Offset(0, 40),
@@ -2171,7 +2172,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                     _buildCpuIndicator(m.cpuLoad),
                     const SizedBox(width: 4),
                     Expanded(child: Text(m.name, maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF1F1F1F)))),
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
                   ]),
                 )).toList(),
             child: Padding(
@@ -2179,14 +2180,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               child: Row(children: [
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(3)),
-                  child: Text(_selectedModel.langCode.toUpperCase(), style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w800, color: Colors.grey)),
+                  decoration: BoxDecoration(color: _isDark ? Colors.white.withValues(alpha: 0.15) : Colors.white, borderRadius: BorderRadius.circular(3)),
+                  child: Text(_selectedModel.langCode.toUpperCase(), style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, color: _isDark ? Colors.white54 : Colors.grey)),
                 ),
                 const SizedBox(width: 4),
                 _buildCpuIndicator(_selectedModel.cpuLoad),
                 const SizedBox(width: 4),
                 Expanded(child: Text(_selectedModel.name, maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11, color: Color(0xFF1F1F1F), fontWeight: FontWeight.w600))),
+                    style: TextStyle(fontSize: 11, color: _isDark ? Colors.white : const Color(0xFF1F1F1F), fontWeight: FontWeight.w600))),
                 const Icon(Icons.keyboard_arrow_down_rounded, color: Color(0xFF1A73E8), size: 18),
               ]),
             ),
@@ -2217,11 +2218,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       child: IconButton(
         tooltip: 'Vzhled',
         icon: Icon(
-          _themeMode == 0 ? Icons.brightness_auto_rounded
-              : _themeMode == 1 ? Icons.light_mode_rounded
+          appThemeNotifier.value == 0 ? Icons.brightness_auto_rounded
+              : appThemeNotifier.value == 1 ? Icons.light_mode_rounded
               : Icons.dark_mode_rounded,
           size: 20,
-          color: _themeMode != 0 ? const Color(0xFF1A73E8) : const Color(0xFF5F6368),
+          color: appThemeNotifier.value != 0 ? const Color(0xFF1A73E8) : const Color(0xFF5F6368),
         ),
         onPressed: () => _toggleThemeOverlay(context),
       ),
@@ -2235,7 +2236,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               onPressed: (_currentZoomFactor <= _minZoom || _isMinZoomReached) ? null : () => _changeZoom(-_zoomStep)),
           Container(constraints: const BoxConstraints(minWidth: 36), alignment: Alignment.center,
               child: Text('${((_currentZoomFactor / (globalIsOriginalLayout ? _pdfBaselineZoom : _textBaselineZoom)) * 100).toStringAsFixed(0)}%',
-                  style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.w700))),
+                  style: TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.w700, color: _isDark ? Colors.white : null))),
           IconButton(icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
               onPressed: (_currentZoomFactor >= _maxZoom || _isMaxZoomReached) ? null : () => _changeZoom(_zoomStep)),
         ]),
@@ -2288,7 +2289,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       final phoneTitleRow = Row(children: [
         const SizedBox(width: 4),
         TextButton.icon(
-          style: TextButton.styleFrom(foregroundColor: Colors.black87, padding: const EdgeInsets.symmetric(horizontal: 6)),
+          style: TextButton.styleFrom(foregroundColor: _isDark ? Colors.white70 : Colors.black87, padding: const EdgeInsets.symmetric(horizontal: 6)),
           onPressed: _handlePopAction,
           icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 14),
           label: const Text('Zpět', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -2300,7 +2301,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
               child: Text(widget.book.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1F1F1F))),
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: _isDark ? Colors.white : const Color(0xFF1F1F1F))),
             ),
           ),
         ),
@@ -2311,7 +2312,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         if (!_isParsingPdf) ...[
           Container(
             height: 32, constraints: const BoxConstraints(maxWidth: 150),
-            decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(8)),
+            decoration: BoxDecoration(color: _isDark ? const Color(0xFF1A3A6E) : const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(8)),
             child: PopupMenuButton<ModelConfig>(
               enabled: !_isBusy && _isReady,
               offset: const Offset(0, 36),
@@ -2362,10 +2363,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         actionsRow,
       ]);
       return Container(
-        decoration: BoxDecoration(color: Colors.white, border: border),
+        decoration: BoxDecoration(
+          color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
+          border: border,
+        ),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           SizedBox(height: 44, child: phoneTitleRow),
-          Container(height: 1, color: Colors.grey.shade100),
+          Container(height: 1, color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade100),
           SizedBox(height: 42, child: phoneSecondRow),
         ]),
       );
@@ -2373,7 +2377,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     // Single-row layout
     return Container(
-      decoration: BoxDecoration(color: Colors.white, border: border),
+      decoration: BoxDecoration(
+        color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
+        border: border,
+      ),
       child: Row(children: [
         Expanded(child: titleRow),
         const VerticalDivider(width: 12, indent: 10, endIndent: 10),
@@ -2396,8 +2403,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         FloatingActionButton.small(
           heroTag: 'toc_fab',
           onPressed: () => setState(() => _tocOpen = !_tocOpen),
-          backgroundColor: _tocOpen ? Colors.orange.shade700 : Colors.white,
-          foregroundColor: _tocOpen ? Colors.white : Colors.black87,
+          backgroundColor: _tocOpen ? const Color(0xFF1A73E8) : (_isDark ? const Color(0xFF2C2C2C) : Colors.white),
+          foregroundColor: _tocOpen ? Colors.white : (_isDark ? Colors.white : Colors.black87),
           elevation: 3,
           child: const Icon(Icons.format_list_bulleted_rounded),
         ),
@@ -2416,10 +2423,10 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               constraints: const BoxConstraints(maxWidth: 280, maxHeight: 320),
               margin: const EdgeInsets.only(top: 6),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: _isDark ? const Color(0xFF2C2C2C) : Colors.white,
                 borderRadius: BorderRadius.circular(12),
-                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 16, offset: const Offset(0, 4))],
-                border: Border.all(color: Colors.grey.shade200),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.22), blurRadius: 16, offset: const Offset(0, 4))],
+                border: Border.all(color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
@@ -2437,7 +2444,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 150),
                         color: isPending
-                            ? Colors.orange.shade50
+                            ? Colors.orange.withValues(alpha: 0.12)
                             : isActiveChapter
                             ? Theme.of(ctx).colorScheme.primary.withValues(alpha: 0.1)
                             : Colors.transparent,
@@ -2469,7 +2476,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                   : e.level == 1 ? FontWeight.w700 : FontWeight.w500,
                               color: isActiveChapter
                                   ? Theme.of(ctx).colorScheme.primary
-                                  : Colors.black87,
+                                  : (_isDark ? Colors.white70 : Colors.black87),
                             ),
                           )),
                           if (isActiveChapter)
@@ -2643,12 +2650,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       // 6 preset speeds in 2 rows × 3 cols
       const List<double> presets = [0.8, 1.0, 1.2, 1.5, 2.0, 2.5];
 
-      return Stack(children: [
+      return Stack(fit: StackFit.expand, children: [
         SizedBox.expand(child: GestureDetector(
           behavior: HitTestBehavior.translucent,
           onTap: _closeSpeedOverlay,
         )),
-        CompositedTransformFollower(
+        UnconstrainedBox(child: CompositedTransformFollower(
           link: _speedLayerLink,
           showWhenUnlinked: false,
           targetAnchor: Alignment.topRight,
@@ -2659,13 +2666,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             child: StatefulBuilder(builder: (_, setLocal) {
               final eta = _etaString(_currentChunkIndex, _chunksMetadata.length, _playbackSpeed);
 
+              final bool dm = _isDark;
               return Container(
                 width: 192,
                 decoration: BoxDecoration(
-                  color: Colors.white,
+                  color: dm ? const Color(0xFF2C2C2C) : Colors.white,
                   borderRadius: BorderRadius.circular(14),
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.16), blurRadius: 18, offset: const Offset(0, 4))],
-                  border: Border.all(color: Colors.grey.shade200),
+                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 18, offset: const Offset(0, 4))],
+                  border: Border.all(color: dm ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
                 ),
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
 
@@ -2673,12 +2681,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   Padding(
                     padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
                     child: Row(children: [
-                      const Icon(Icons.speed_rounded, size: 13, color: Color(0xFF5F6368)),
+                      Icon(Icons.speed_rounded, size: 13, color: dm ? Colors.white54 : const Color(0xFF5F6368)),
                       const SizedBox(width: 5),
-                      const Expanded(child: Text('Rychlost čtení',
-                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F)))),
+                      Expanded(child: Text('Rychlost čtení',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: dm ? Colors.white : const Color(0xFF1F1F1F)))),
                       if (eta.isNotEmpty)
-                        Text(eta, style: const TextStyle(fontSize: 10, color: Color(0xFF5F6368), fontWeight: FontWeight.w500)),
+                        Text(eta, style: TextStyle(fontSize: 10, color: dm ? Colors.white54 : const Color(0xFF5F6368), fontWeight: FontWeight.w500)),
                     ]),
                   ),
                   const Divider(height: 1, thickness: 0.5),
@@ -2686,8 +2694,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   // ── 2. Pill slider with min/max labels beside it ─────────
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                    child: Row(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                      Column(mainAxisSize: MainAxisSize.min, children: [
+                    child: Center(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
                         const Text('4x', style: TextStyle(fontSize: 9, color: Color(0xFF9AA0A6))),
                         const SizedBox(height: 4),
                         _VerticalSpeedSlider(
@@ -2704,7 +2712,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         const SizedBox(height: 4),
                         Text('${rangeMin}x', style: const TextStyle(fontSize: 9, color: Color(0xFF9AA0A6))),
                       ]),
-                    ]),
+                    ),
                   ),
                   const Divider(height: 1, thickness: 0.5),
 
@@ -2715,9 +2723,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                       crossAxisCount: 3,
                       shrinkWrap: true,
                       physics: const NeverScrollableScrollPhysics(),
-                      mainAxisSpacing: 8,
-                      crossAxisSpacing: 8,
-                      childAspectRatio: 2.0,
+                      mainAxisSpacing: 6,
+                      crossAxisSpacing: 6,
+                      childAspectRatio: 2.2,
                       children: presets.map((spd) {
                         final bool active = (_playbackSpeed - spd).abs() < 0.01;
                         return GestureDetector(
@@ -2725,15 +2733,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 100),
                             decoration: BoxDecoration(
-                              color: active ? const Color(0xFF1A73E8) : const Color(0xFFF1F3F4),
+                              color: active ? const Color(0xFF1A73E8) : (dm ? const Color(0xFF3C3C3C) : const Color(0xFFF1F3F4)),
                               borderRadius: BorderRadius.circular(9),
                             ),
                             alignment: Alignment.center,
                             child: Text(
                               spd % 1 == 0 ? '${spd.toInt()}x' : '${spd}x',
                               style: TextStyle(
-                                fontSize: 15, fontWeight: FontWeight.w800,
-                                color: active ? Colors.white : Colors.black87,
+                                fontSize: 13, fontWeight: FontWeight.w700,
+                                color: active ? Colors.white : (dm ? Colors.white70 : Colors.black87),
                               ),
                             ),
                           ),
@@ -2755,9 +2763,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         },
                         child: Container(
                           width: 34, height: 34,
-                          decoration: BoxDecoration(color: const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(8)),
+                          decoration: BoxDecoration(color: dm ? const Color(0xFF3C3C3C) : const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(8)),
                           alignment: Alignment.center,
-                          child: const Text('−', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F))),
+                          child: Text('−', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: dm ? Colors.white : const Color(0xFF1F1F1F))),
                         ),
                       ),
                       Text(
@@ -2772,9 +2780,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         },
                         child: Container(
                           width: 34, height: 34,
-                          decoration: BoxDecoration(color: const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(8)),
+                          decoration: BoxDecoration(color: dm ? const Color(0xFF3C3C3C) : const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(8)),
                           alignment: Alignment.center,
-                          child: const Text('+', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F))),
+                          child: Text('+', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: dm ? Colors.white : const Color(0xFF1F1F1F))),
                         ),
                       ),
                     ]),
@@ -2821,9 +2829,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        const Expanded(
+                        Expanded(
                           child: Text('Zvýšit rychlost automaticky\nkaždých 650 slov',
-                              style: TextStyle(fontSize: 10, height: 1.35, fontWeight: FontWeight.w500, color: Color(0xFF3C4043))),
+                              style: TextStyle(fontSize: 10, height: 1.35, fontWeight: FontWeight.w500, color: dm ? Colors.white70 : const Color(0xFF3C4043))),
                         ),
                       ]),
                     ),
@@ -2832,6 +2840,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               );
             }),
           ),
+        ),
         ),
       ]);
     });
@@ -2848,9 +2857,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _moreOpen = true;
     if (mounted) setState(() {});
 
-    _moreOverlay = OverlayEntry(builder: (_) => Stack(children: [
+    _moreOverlay = OverlayEntry(builder: (_) => Stack(fit: StackFit.expand, children: [
       SizedBox.expand(child: GestureDetector(behavior: HitTestBehavior.translucent, onTap: _closeMoreOverlay)),
-      CompositedTransformFollower(
+      UnconstrainedBox(child: CompositedTransformFollower(
         link: _moreLayerLink,
         showWhenUnlinked: false,
         targetAnchor: Alignment.bottomRight,
@@ -2859,13 +2868,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         child: Material(
           color: Colors.transparent,
           child: StatefulBuilder(builder: (_, setLocal) {
+            final bool mdm = _isDark;
             return Container(
               width: 220,
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: mdm ? const Color(0xFF2C2C2C) : Colors.white,
                 borderRadius: BorderRadius.circular(12),
-                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 16, offset: const Offset(0, 4))],
-                border: Border.all(color: Colors.grey.shade200),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 16, offset: const Offset(0, 4))],
+                border: Border.all(color: mdm ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
               ),
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 // Zoom row
@@ -2875,14 +2885,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                     child: Row(children: [
                       const Icon(Icons.zoom_in_rounded, size: 16, color: Color(0xFF5F6368)),
                       const SizedBox(width: 6),
-                      const Text('Zoom', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                      Text('Zoom', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: mdm ? Colors.white : const Color(0xFF1F1F1F))),
                       const Spacer(),
                       IconButton(icon: const Icon(Icons.remove_circle_outline_rounded, size: 18),
                           onPressed: (_currentZoomFactor <= _minZoom) ? null : () { _changeZoom(-_zoomStep); setLocal(() {}); },
                           padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 32, minHeight: 32)),
                       Container(constraints: const BoxConstraints(minWidth: 40), alignment: Alignment.center,
                           child: Text('${((_currentZoomFactor / (globalIsOriginalLayout ? _pdfBaselineZoom : _textBaselineZoom)) * 100).toStringAsFixed(0)}%',
-                              style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.w700))),
+                              style: TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.w700, color: _isDark ? Colors.white : null))),
                       IconButton(icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
                           onPressed: (_currentZoomFactor >= _maxZoom) ? null : () { _changeZoom(_zoomStep); setLocal(() {}); },
                           padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 32, minHeight: 32)),
@@ -2930,19 +2940,19 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         ])
                           GestureDetector(
                             onTap: () {
-                              setState(() => _themeMode = entry.$1);
-                              SharedPreferences.getInstance().then((p) => p.setInt('theme_mode', entry.$1));
+                              appThemeNotifier.value = entry.$1; setState(() {});
+                              SharedPreferences.getInstance().then((p) => p.setInt('theme_mode', appThemeNotifier.value));
                               setLocal(() {});
                             },
                             child: AnimatedContainer(
                               duration: const Duration(milliseconds: 120),
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                               decoration: BoxDecoration(
-                                color: _themeMode == entry.$1 ? const Color(0xFF1A73E8) : Colors.transparent,
+                                color: appThemeNotifier.value == entry.$1 ? const Color(0xFF1A73E8) : Colors.transparent,
                                 borderRadius: BorderRadius.circular(7),
                               ),
                               child: Icon(entry.$2, size: 15,
-                                  color: _themeMode == entry.$1 ? Colors.white : const Color(0xFF5F6368)),
+                                  color: appThemeNotifier.value == entry.$1 ? Colors.white : const Color(0xFF5F6368)),
                             ),
                           ),
                       ]),
@@ -2953,6 +2963,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             );
           }),
         ),
+      ),
       ),
     ]));
     Overlay.of(context).insert(_moreOverlay!);
@@ -2974,9 +2985,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _themeOpen = true;
     if (mounted) setState(() {});
 
-    _themeOverlay = OverlayEntry(builder: (_) => Stack(children: [
+    _themeOverlay = OverlayEntry(builder: (_) => Stack(fit: StackFit.expand, children: [
       SizedBox.expand(child: GestureDetector(behavior: HitTestBehavior.translucent, onTap: _closeThemeOverlay)),
-      CompositedTransformFollower(
+      UnconstrainedBox(child: CompositedTransformFollower(
         link: _themeLayerLink,
         showWhenUnlinked: false,
         targetAnchor: Alignment.bottomRight,
@@ -2985,21 +2996,22 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         child: Material(
           color: Colors.transparent,
           child: StatefulBuilder(builder: (_, setLocal) {
+            final bool tdm = _isDark;
             return Container(
               width: 180,
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: tdm ? const Color(0xFF2C2C2C) : Colors.white,
                 borderRadius: BorderRadius.circular(12),
-                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 16, offset: const Offset(0, 4))],
-                border: Border.all(color: Colors.grey.shade200),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 16, offset: const Offset(0, 4))],
+                border: Border.all(color: tdm ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
               ),
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
                   child: Row(children: [
-                    const Icon(Icons.brightness_6_rounded, size: 14, color: Color(0xFF5F6368)),
+                    Icon(Icons.brightness_6_rounded, size: 14, color: tdm ? Colors.white54 : const Color(0xFF5F6368)),
                     const SizedBox(width: 6),
-                    const Text('Vzhled', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+                    Text('Vzhled', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: tdm ? Colors.white : const Color(0xFF1F1F1F))),
                   ]),
                 ),
                 const Divider(height: 1, thickness: 0.5),
@@ -3010,19 +3022,19 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                 ])
                   InkWell(
                     onTap: () {
-                      setState(() => _themeMode = entry.$1);
-                      SharedPreferences.getInstance().then((p) => p.setInt('theme_mode', entry.$1));
+                      appThemeNotifier.value = entry.$1; setState(() {});
+                      SharedPreferences.getInstance().then((p) => p.setInt('theme_mode', appThemeNotifier.value));
                       setLocal(() {});
                     },
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                       child: Row(children: [
-                        Icon(entry.$2, size: 16, color: _themeMode == entry.$1 ? const Color(0xFF1A73E8) : const Color(0xFF5F6368)),
+                        Icon(entry.$2, size: 16, color: appThemeNotifier.value == entry.$1 ? const Color(0xFF1A73E8) : const Color(0xFF5F6368)),
                         const SizedBox(width: 10),
                         Expanded(child: Text(entry.$3, style: TextStyle(fontSize: 13,
-                            fontWeight: _themeMode == entry.$1 ? FontWeight.w700 : FontWeight.w500,
-                            color: _themeMode == entry.$1 ? const Color(0xFF1A73E8) : Colors.black87))),
-                        if (_themeMode == entry.$1) const Icon(Icons.check_rounded, size: 16, color: Color(0xFF1A73E8)),
+                            fontWeight: appThemeNotifier.value == entry.$1 ? FontWeight.w700 : FontWeight.w500,
+                            color: appThemeNotifier.value == entry.$1 ? const Color(0xFF1A73E8) : Colors.black87))),
+                        if (appThemeNotifier.value == entry.$1) const Icon(Icons.check_rounded, size: 16, color: Color(0xFF1A73E8)),
                       ]),
                     ),
                   ),
@@ -3031,6 +3043,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             );
           }),
         ),
+      ),
       ),
     ]));
     Overlay.of(context).insert(_themeOverlay!);
@@ -3053,12 +3066,12 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (mounted) setState(() {});
 
     _parametryOverlay = OverlayEntry(builder: (ctx) {
-      return Stack(children: [
+      return Stack(fit: StackFit.expand, children: [
         SizedBox.expand(child: GestureDetector(
           behavior: HitTestBehavior.translucent,
           onTap: _closeParametryOverlay,
         )),
-        CompositedTransformFollower(
+        UnconstrainedBox(child: CompositedTransformFollower(
           link: _parametryLayerLink,
           showWhenUnlinked: false,
           targetAnchor: Alignment.bottomRight,
@@ -3067,6 +3080,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           child: Material(
             color: Colors.transparent,
             child: StatefulBuilder(builder: (_, setLocal) {
+              final bool pdm = _isDark;
               void toggle(String v) {
                 setState(() {
                   if (v == 'parentheses') _skipParentheses = !_skipParentheses;
@@ -3101,7 +3115,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         const SizedBox(width: 8),
                         Text(label, style: TextStyle(
                           fontSize: 12, fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                          color: active ? dot : Colors.black87,
+                          color: active ? dot : (pdm ? Colors.white70 : Colors.black87),
                         )),
                       ]),
                     ),
@@ -3110,18 +3124,18 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               return Container(
                 width: 210,
                 decoration: BoxDecoration(
-                  color: Colors.white,
+                  color: pdm ? const Color(0xFF2C2C2C) : Colors.white,
                   borderRadius: BorderRadius.circular(12),
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 16, offset: const Offset(0, 4))],
-                  border: Border.all(color: Colors.grey.shade200),
+                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 16, offset: const Offset(0, 4))],
+                  border: Border.all(color: pdm ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
                 ),
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
                   Padding(
                     padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
                     child: Row(children: [
-                      const Icon(Icons.tune_rounded, size: 13, color: Color(0xFF5F6368)),
+                      Icon(Icons.tune_rounded, size: 13, color: pdm ? Colors.white54 : const Color(0xFF5F6368)),
                       const SizedBox(width: 6),
-                      const Text('Parametry', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF1F1F1F))),
+                      Text('Parametry', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: pdm ? Colors.white : const Color(0xFF1F1F1F))),
                     ]),
                   ),
                   const Divider(height: 1, thickness: 0.5),
@@ -3134,6 +3148,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               );
             }),
           ),
+        ),
         ),
       ]);
     });
@@ -3165,383 +3180,394 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       if (!_searchOpen && _keyboardFocusNode.canRequestFocus) _keyboardFocusNode.requestFocus();
     });
 
-    return Theme(
-      data: _isDark
-          ? ThemeData.dark(useMaterial3: true).copyWith(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A73E8), brightness: Brightness.dark))
-          : ThemeData.light(useMaterial3: true).copyWith(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A73E8))),
-      child: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.arrowUp, control: true): () => _changeZoom(_zoomStep),
-          const SingleActivator(LogicalKeyboardKey.arrowDown, control: true): () => _changeZoom(-_zoomStep),
-          const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
-            setState(() {
-              _searchOpen = !_searchOpen;
-              if (!_searchOpen) { _searchQuery = ''; _searchMatches.clear(); _searchMatchIndex = 0; }
-            });
+    return ValueListenableBuilder<int>(
+      valueListenable: appThemeNotifier,
+      builder: (context, themeVal, child) => Theme(
+        data: _isDark
+            ? ThemeData.dark(useMaterial3: true).copyWith(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A73E8), brightness: Brightness.dark))
+            : ThemeData.light(useMaterial3: true).copyWith(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A73E8))),
+        child: CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.arrowUp, control: true): () => _changeZoom(_zoomStep),
+            const SingleActivator(LogicalKeyboardKey.arrowDown, control: true): () => _changeZoom(-_zoomStep),
+            const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+              setState(() {
+                _searchOpen = !_searchOpen;
+                if (!_searchOpen) { _searchQuery = ''; _searchMatches.clear(); _searchMatchIndex = 0; }
+              });
+            },
           },
-        },
-        child: Focus(
-          focusNode: _keyboardFocusNode,
-          child: Scaffold(
-            backgroundColor: _isDark ? const Color(0xFF121212) : const Color(0xFFF8F9FA),
-            appBar: (_needsModelSelection || _isFullscreen)
-                ? null
-                : PreferredSize(
-              preferredSize: MediaQuery.of(context).size.width < 480
-                  ? const Size.fromHeight(96)   // two rows on phone
-                  : const Size.fromHeight(56),  // one row on wide screen
-              child: _buildAppBar(context),
-            ),
-            body: SafeArea(
-              child: _needsModelSelection
-                  ? Center(
-                child: Container(
-                  constraints: const BoxConstraints(maxWidth: 400),
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), border: Border.all(color: Colors.grey.shade200)),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.voice_over_off_rounded, size: 48, color: Color(0xFF1A73E8)),
-                      const SizedBox(height: 16),
-                      const Text('Vyberte hlas pro tento dokument', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F1F1F))),
-                      const SizedBox(height: 8),
-                      const Text('Tento dokument nemá přiřazený model. Zvolte výchozí formát čtení:', textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: Colors.grey)),
-                      const SizedBox(height: 24),
-                      ...availableModels.map((model) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10.0),
-                        child: OutlinedButton(
-                          style: OutlinedButton.styleFrom(
-                            minimumSize: const Size.fromHeight(50),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            side: BorderSide(color: Colors.grey.shade300),
-                          ),
-                          onPressed: () => _selectInitialModel(model),
-                          child: Row(
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(4)),
-                                child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF1A73E8))),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(child: Text(model.name, style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF1F1F1F)))),
-                              _buildCpuIndicator(model.cpuLoad),
-                            ],
-                          ),
-                        ),
-                      )),
-                    ],
-                  ),
-                ),
-              )
-                  : Padding(
-                padding: _isFullscreen ? EdgeInsets.zero : const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: Stack(
-                        children: [
-                          Container(
-                            width: double.infinity,
-                            decoration: BoxDecoration(
-                              color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
-                              borderRadius: _isFullscreen ? BorderRadius.zero : BorderRadius.circular(16),
-                              border: _isFullscreen ? null : Border.all(color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
-                              boxShadow: _isFullscreen ? [] : [BoxShadow(color: Colors.black.withValues(alpha: _isDark ? 0.3 : 0.02), blurRadius: 12, offset: const Offset(0, 4))],
+          child: Focus(
+            focusNode: _keyboardFocusNode,
+            child: Scaffold(
+              backgroundColor: _isDark ? const Color(0xFF121212) : const Color(0xFFF8F9FA),
+              appBar: (_needsModelSelection || _isFullscreen)
+                  ? null
+                  : PreferredSize(
+                preferredSize: MediaQuery.of(context).size.width < 480
+                    ? const Size.fromHeight(96)   // two rows on phone
+                    : const Size.fromHeight(56),  // one row on wide screen
+                child: _buildAppBar(context),
+              ),
+              body: SafeArea(
+                child: _needsModelSelection
+                    ? Center(
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 400),
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), border: Border.all(color: Colors.grey.shade200)),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.voice_over_off_rounded, size: 48, color: Color(0xFF1A73E8)),
+                        const SizedBox(height: 16),
+                        const Text('Vyberte hlas pro tento dokument', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F1F1F))),
+                        const SizedBox(height: 8),
+                        const Text('Tento dokument nemá přiřazený model. Zvolte výchozí formát čtení:', textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: Colors.grey)),
+                        const SizedBox(height: 24),
+                        ...availableModels.map((model) => Padding(
+                          padding: const EdgeInsets.only(bottom: 10.0),
+                          child: OutlinedButton(
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size.fromHeight(50),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              side: BorderSide(color: Colors.grey.shade300),
                             ),
-                            child: ClipRRect(
-                              borderRadius: _isFullscreen ? BorderRadius.zero : BorderRadius.circular(16),
-                              child: (_isParsingPdf || !_isReady)
-                                  ? ExcludeSemantics(
-                                excluding: _isParsingPdf || !_isReady,
-                                child: Center(
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      const CircularProgressIndicator(strokeWidth: 3),
-                                      const SizedBox(height: 24),
-                                      Text(
-                                        '$_loadingStatusText (${(_parsingProgress * 100).toStringAsFixed(0)}%)',
-                                        style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: 13),
-                                        textAlign: TextAlign.center,
-                                      ),
-                                      const SizedBox(height: 16),
-                                      Container(
-                                        width: 240, height: 4,
-                                        decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(2)),
-                                        child: Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: Container(
-                                            width: 240 * _parsingProgress, height: 4,
-                                            decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, borderRadius: BorderRadius.circular(2)),
+                            onPressed: () => _selectInitialModel(model),
+                            child: Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(4)),
+                                  child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF1A73E8))),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(child: Text(model.name, style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF1F1F1F)))),
+                                _buildCpuIndicator(model.cpuLoad),
+                              ],
+                            ),
+                          ),
+                        )),
+                      ],
+                    ),
+                  ),
+                )
+                    : Padding(
+                  padding: _isFullscreen ? EdgeInsets.zero : const EdgeInsets.all(16.0),
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Stack(
+                          children: [
+                            Container(
+                              width: double.infinity,
+                              decoration: BoxDecoration(
+                                color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
+                                borderRadius: _isFullscreen ? BorderRadius.zero : BorderRadius.circular(16),
+                                border: _isFullscreen ? null : Border.all(color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
+                                boxShadow: _isFullscreen ? [] : [BoxShadow(color: Colors.black.withValues(alpha: _isDark ? 0.3 : 0.02), blurRadius: 12, offset: const Offset(0, 4))],
+                              ),
+                              child: ClipRRect(
+                                borderRadius: _isFullscreen ? BorderRadius.zero : BorderRadius.circular(16),
+                                child: (_isParsingPdf || !_isReady)
+                                    ? ExcludeSemantics(
+                                  excluding: _isParsingPdf || !_isReady,
+                                  child: Center(
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        const CircularProgressIndicator(strokeWidth: 3),
+                                        const SizedBox(height: 24),
+                                        Text(
+                                          '$_loadingStatusText (${(_parsingProgress * 100).toStringAsFixed(0)}%)',
+                                          style: TextStyle(color: _isDark ? Colors.white54 : Colors.grey, fontWeight: FontWeight.w600, fontSize: 13),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                        const SizedBox(height: 16),
+                                        Container(
+                                          width: 240, height: 4,
+                                          decoration: BoxDecoration(color: _isDark ? const Color(0xFF3A3A3A) : Colors.grey.shade200, borderRadius: BorderRadius.circular(2)),
+                                          child: Align(
+                                            alignment: Alignment.centerLeft,
+                                            child: Container(
+                                              width: 240 * _parsingProgress, height: 4,
+                                              decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, borderRadius: BorderRadius.circular(2)),
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                    ],
+                                      ],
+                                    ),
                                   ),
-                                ),
-                              )
-                                  : IndexedStack(
-                                index: (globalIsOriginalLayout && !_isTxtFile) ? 1 : 0,
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.all(8.0),
-                                    child: NotificationListener<ScrollStartNotification>(
-                                      onNotification: (n) {
-                                        if (n.dragDetails != null && !_isUserScrolling && !_isProgrammaticScrolling) {
-                                          setState(() { _isUserScrolling = true; });
-                                        }
-                                        return false;
-                                      },
-                                      child: ScrollablePositionedList.builder(
-                                        itemScrollController: _itemScrollController,
-                                        itemPositionsListener: _itemPositionsListener,
-                                        padding: const EdgeInsets.only(top: 52),
-                                        itemCount: _chunksMetadata.length,
-                                        itemBuilder: (context, index) {
-                                          final bool isCurrent = index == _currentChunkIndex;
-                                          final bool isSelected = index == _selectedChunkIndex;
-                                          final bool isPending = index == _pendingJumpIndex;
-                                          final bool isSearchMatch = _searchMatches.isNotEmpty && _searchMatches.contains(index);
-                                          final bool isActiveSearchMatch = _searchMatches.isNotEmpty && _searchMatchIndex < _searchMatches.length && _searchMatches[_searchMatchIndex] == index;
-                                          final int lvl = _headingLevel(index);
-                                          final bool isHeading = lvl > 0;
-
-                                          double fontSize;
-                                          FontWeight fontWeight;
-                                          EdgeInsets extraPad;
-                                          switch (lvl) {
-                                            case 1: fontSize = 22 * _textZoomFactor; fontWeight = FontWeight.w800; extraPad = const EdgeInsets.only(top: 12, bottom: 4);
-                                            case 2: fontSize = 18 * _textZoomFactor; fontWeight = FontWeight.w700; extraPad = const EdgeInsets.only(top: 8, bottom: 2);
-                                            case 3: fontSize = 15 * _textZoomFactor; fontWeight = FontWeight.w600; extraPad = const EdgeInsets.only(top: 4);
-                                            default: fontSize = 16 * _textZoomFactor; fontWeight = FontWeight.normal; extraPad = EdgeInsets.zero;
+                                )
+                                    : IndexedStack(
+                                  index: (globalIsOriginalLayout && !_isTxtFile) ? 1 : 0,
+                                  children: [
+                                    Padding(
+                                      padding: const EdgeInsets.all(8.0),
+                                      child: NotificationListener<ScrollStartNotification>(
+                                        onNotification: (n) {
+                                          if (n.dragDetails != null && !_isUserScrolling && !_isProgrammaticScrolling) {
+                                            setState(() { _isUserScrolling = true; });
                                           }
+                                          return false;
+                                        },
+                                        child: ScrollablePositionedList.builder(
+                                          itemScrollController: _itemScrollController,
+                                          itemPositionsListener: _itemPositionsListener,
+                                          padding: const EdgeInsets.only(top: 52),
+                                          itemCount: _chunksMetadata.length,
+                                          itemBuilder: (context, index) {
+                                            final bool isCurrent = index == _currentChunkIndex;
+                                            final bool isSelected = index == _selectedChunkIndex;
+                                            final bool isPending = index == _pendingJumpIndex;
+                                            final bool isSearchMatch = _searchMatches.isNotEmpty && _searchMatches.contains(index);
+                                            final bool isActiveSearchMatch = _searchMatches.isNotEmpty && _searchMatchIndex < _searchMatches.length && _searchMatches[_searchMatchIndex] == index;
+                                            final int lvl = _headingLevel(index);
+                                            final bool isHeading = lvl > 0;
 
-                                          Color bgColor = Colors.transparent;
-                                          Border? border;
-                                          if (isPending) {
-                                            bgColor = Colors.orange.shade50;
-                                            border = Border.all(color: Colors.orange.shade400, width: 2);
-                                          } else if (_isBusy && isCurrent) {
-                                            bgColor = Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.3);
-                                            border = Border.all(color: Theme.of(context).colorScheme.primary, width: 1.5);
-                                          } else if (isSelected) {
-                                            bgColor = Colors.orange.shade50;
-                                            border = Border.all(color: Colors.orange.shade400, width: 1.5);
-                                          } else if (isCurrent && !_isBusy) {
-                                            border = Border.all(color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4), width: 1);
-                                          }
+                                            double fontSize;
+                                            FontWeight fontWeight;
+                                            EdgeInsets extraPad;
+                                            switch (lvl) {
+                                              case 1: fontSize = 22 * _textZoomFactor; fontWeight = FontWeight.w800; extraPad = const EdgeInsets.only(top: 12, bottom: 4);
+                                              case 2: fontSize = 18 * _textZoomFactor; fontWeight = FontWeight.w700; extraPad = const EdgeInsets.only(top: 8, bottom: 2);
+                                              case 3: fontSize = 15 * _textZoomFactor; fontWeight = FontWeight.w600; extraPad = const EdgeInsets.only(top: 4);
+                                              default: fontSize = 16 * _textZoomFactor; fontWeight = FontWeight.normal; extraPad = EdgeInsets.zero;
+                                            }
 
-                                          final Widget textWidget = (_isBusy && isCurrent)
-                                              ? RichText(text: TextSpan(
-                                            style: TextStyle(fontSize: fontSize, height: 1.6, color: Colors.black87, fontWeight: fontWeight),
-                                            children: _buildHighlightedWords(_chunksMetadata[index].text, context),
-                                          ))
-                                              : (isSearchMatch && _searchQuery.isNotEmpty)
-                                              ? RichText(text: TextSpan(
-                                            style: TextStyle(fontSize: fontSize, height: isHeading ? 1.3 : 1.6, fontWeight: fontWeight,
-                                                color: index < _currentChunkIndex ? Colors.grey.shade400 : Colors.black87),
-                                            children: _buildSearchHighlightedWords(_chunksMetadata[index].text, _searchQuery, isActiveSearchMatch),
-                                          ))
-                                              : Text(_chunksMetadata[index].text, style: TextStyle(
-                                            fontSize: fontSize,
-                                            height: isHeading ? 1.3 : 1.6,
-                                            fontWeight: fontWeight,
-                                            color: index < _currentChunkIndex
-                                                ? (isHeading ? Colors.grey.shade500 : Colors.grey.shade400)
-                                                : (isHeading ? Colors.black : Colors.black87),
-                                          ));
+                                            Color bgColor = Colors.transparent;
+                                            Border? border;
+                                            if (isPending) {
+                                              bgColor = Colors.orange.withValues(alpha: 0.12);
+                                              border = Border.all(color: Colors.orange.shade400, width: 2);
+                                            } else if (_isBusy && isCurrent) {
+                                              bgColor = Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.3);
+                                              border = Border.all(color: Theme.of(context).colorScheme.primary, width: 1.5);
+                                            } else if (isSelected) {
+                                              bgColor = Colors.orange.withValues(alpha: 0.12);
+                                              border = Border.all(color: Colors.orange.shade400, width: 1.5);
+                                            } else if (isCurrent && !_isBusy) {
+                                              border = Border.all(color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4), width: 1);
+                                            }
 
-                                          return Padding(
-                                            padding: extraPad,
-                                            child: Container(
-                                              margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
-                                              child: InkWell(
-                                                onTap: () => setState(() { _selectedChunkIndex = index; }),
-                                                borderRadius: BorderRadius.circular(8),
-                                                child: AnimatedContainer(
-                                                  duration: const Duration(milliseconds: 150),
-                                                  padding: EdgeInsets.fromLTRB(isHeading ? 10 : 12, 10, 12, 10),
-                                                  decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8), border: border),
-                                                  child: isHeading
-                                                      ? Row(children: [
-                                                    Container(
-                                                      width: 3, height: fontSize * 1.1,
-                                                      margin: const EdgeInsets.only(right: 8),
-                                                      decoration: BoxDecoration(
-                                                        color: lvl == 1 ? Theme.of(context).colorScheme.primary
-                                                            : lvl == 2 ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.6)
-                                                            : Theme.of(context).colorScheme.primary.withValues(alpha: 0.35),
-                                                        borderRadius: BorderRadius.circular(2),
+                                            final Widget textWidget = (_isBusy && isCurrent)
+                                                ? RichText(text: TextSpan(
+                                              style: TextStyle(fontSize: fontSize, height: 1.6, color: _isDark ? Colors.white70 : Colors.black87, fontWeight: fontWeight),
+                                              children: _buildHighlightedWords(_chunksMetadata[index].text, context),
+                                            ))
+                                                : (isSearchMatch && _searchQuery.isNotEmpty)
+                                                ? RichText(text: TextSpan(
+                                              style: TextStyle(fontSize: fontSize, height: isHeading ? 1.3 : 1.6, fontWeight: fontWeight,
+                                                  color: index < _currentChunkIndex ? (_isDark ? Colors.white24 : Colors.grey.shade400) : (_isDark ? Colors.white70 : Colors.black87)),
+                                              children: _buildSearchHighlightedWords(_chunksMetadata[index].text, _searchQuery, isActiveSearchMatch),
+                                            ))
+                                                : Text(_chunksMetadata[index].text, style: TextStyle(
+                                              fontSize: fontSize,
+                                              height: isHeading ? 1.3 : 1.6,
+                                              fontWeight: fontWeight,
+                                              color: index < _currentChunkIndex
+                                                  ? (isHeading ? Colors.grey.shade500 : (_isDark ? Colors.white30 : Colors.grey.shade400))
+                                                  : (isHeading ? (_isDark ? Colors.white : Colors.black) : (_isDark ? Colors.white70 : Colors.black87)),
+                                            ));
+
+                                            return Padding(
+                                              padding: extraPad,
+                                              child: Container(
+                                                margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+                                                child: InkWell(
+                                                  onTap: () => setState(() { _selectedChunkIndex = index; }),
+                                                  borderRadius: BorderRadius.circular(8),
+                                                  child: AnimatedContainer(
+                                                    duration: const Duration(milliseconds: 150),
+                                                    padding: EdgeInsets.fromLTRB(isHeading ? 10 : 12, 10, 12, 10),
+                                                    decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8), border: border),
+                                                    child: isHeading
+                                                        ? Row(children: [
+                                                      Container(
+                                                        width: 3, height: fontSize * 1.1,
+                                                        margin: const EdgeInsets.only(right: 8),
+                                                        decoration: BoxDecoration(
+                                                          color: lvl == 1 ? Theme.of(context).colorScheme.primary
+                                                              : lvl == 2 ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.6)
+                                                              : Theme.of(context).colorScheme.primary.withValues(alpha: 0.35),
+                                                          borderRadius: BorderRadius.circular(2),
+                                                        ),
                                                       ),
-                                                    ),
-                                                    Expanded(child: textWidget),
-                                                  ])
-                                                      : textWidget,
+                                                      Expanded(child: textWidget),
+                                                    ])
+                                                        : textWidget,
+                                                  ),
                                                 ),
                                               ),
-                                            ),
-                                          );
-                                        },
+                                            );
+                                          },
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                  if (!_isTxtFile)
-                                    _buildPdfViewer()
-                                  else
-                                    const SizedBox.shrink(),
-                                ],
-                              ),
-                            ),
-                          ),
-                          if (!_isFullscreen && _tocEntries.isNotEmpty)
-                            Positioned(top: 12, left: 12, child: _buildTocButton(context)),
-                          // Search bar — own StatefulWidget so parent setState() never unfocuses it
-                          if (_searchOpen)
-                            Positioned(
-                              top: _isFullscreen ? 16 : 8,
-                              right: _isFullscreen ? 60 : 8,
-                              width: 220,
-                              child: _SearchBar(
-                                key: const ValueKey('search_bar'),
-                                initialQuery: _searchQuery,
-                                matchCount: _searchMatches.length,
-                                activeIndex: _searchMatchIndex,
-                                onQueryChanged: (q) {
-                                  _searchQuery = q;
-                                  _searchMatches.clear();
-                                  _searchMatchIndex = 0;
-                                  if (q.isNotEmpty) {
-                                    for (int i = 0; i < _chunksMetadata.length; i++) {
-                                      if (_chunksMetadata[i].text.toLowerCase().contains(q)) _searchMatches.add(i);
-                                    }
-                                    if (_searchMatches.isNotEmpty) _scrollToCurrentChunk(_searchMatches[0], force: true);
-                                  }
-                                  setState(() {});
-                                },
-                                onPrev: () => setState(() {
-                                  if (_searchMatches.isEmpty) return;
-                                  _searchMatchIndex = (_searchMatchIndex - 1 + _searchMatches.length) % _searchMatches.length;
-                                  _scrollToCurrentChunk(_searchMatches[_searchMatchIndex], force: true);
-                                }),
-                                onNext: () => setState(() {
-                                  if (_searchMatches.isEmpty) return;
-                                  _searchMatchIndex = (_searchMatchIndex + 1) % _searchMatches.length;
-                                  _scrollToCurrentChunk(_searchMatches[_searchMatchIndex], force: true);
-                                }),
-                              ),
-                            ),
-                          if (_isUserScrolling && !_isFullscreen)
-                            Positioned(
-                              bottom: 16, right: 16,
-                              child: FloatingActionButton.small(
-                                onPressed: _recenterToCurrentChunk,
-                                backgroundColor: const Color(0xFF1A73E8),
-                                foregroundColor: Colors.white,
-                                child: const Icon(Icons.center_focus_strong_rounded),
-                              ),
-                            ),
-                          if (_isFullscreen)
-                            Positioned(
-                              top: 16, right: 16,
-                              child: Container(
-                                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.9), shape: BoxShape.circle),
-                                child: IconButton(
-                                  icon: const Icon(Icons.fullscreen_exit_rounded, color: Colors.black87),
-                                  onPressed: () => setState(() => _isFullscreen = false),
+                                    if (!_isTxtFile)
+                                      _buildPdfViewer()
+                                    else
+                                      const SizedBox.shrink(),
+                                  ],
                                 ),
                               ),
                             ),
-                          if (_isFullscreen)
-                            Positioned(
-                              bottom: 20, right: 16,
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  if (_isUserScrolling) ...[
-                                    FloatingActionButton.small(
-                                      onPressed: _recenterToCurrentChunk,
-                                      backgroundColor: const Color(0xFF1A73E8),
-                                      foregroundColor: Colors.white,
-                                      child: const Icon(Icons.center_focus_strong_rounded),
-                                    ),
-                                    const SizedBox(height: 10),
-                                  ],
-                                  // Mini playback island — black on white, slightly larger
-                                  Container(
-                                    decoration: BoxDecoration(
-                                      color: Colors.white,
-                                      borderRadius: BorderRadius.circular(28),
-                                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.18), blurRadius: 12, offset: const Offset(0, 3))],
-                                    ),
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                      IconButton(
-                                        icon: const Icon(Icons.replay_10_rounded, size: 26, color: Colors.black87),
-                                        onPressed: _isBusy ? () => _seekRelative(-10) : null,
-                                        padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                                      ),
-                                      IconButton(
-                                        icon: Icon(
-                                          _isBusy ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                                          size: 28, color: Colors.black87,
-                                        ),
-                                        onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
-                                        padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(Icons.forward_10_rounded, size: 26, color: Colors.black87),
-                                        onPressed: _isBusy ? () => _seekRelative(10) : null,
-                                        padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                                      ),
-                                    ]),
-                                  ),
-                                ],
+                            if (!_isFullscreen && _tocEntries.isNotEmpty)
+                              Positioned(top: 12, left: 12, child: _buildTocButton(context)),
+                            // Search bar — own StatefulWidget so parent setState() never unfocuses it
+                            if (_searchOpen)
+                              Positioned(
+                                top: _isFullscreen ? 16 : 8,
+                                right: _isFullscreen ? 60 : 8,
+                                width: 220,
+                                child: _SearchBar(
+                                  key: const ValueKey('search_bar'),
+                                  initialQuery: _searchQuery,
+                                  matchCount: _searchMatches.length,
+                                  activeIndex: _searchMatchIndex,
+                                  onQueryChanged: (q) {
+                                    _searchQuery = q;
+                                    _searchMatches.clear();
+                                    _searchMatchIndex = 0;
+                                    if (q.isNotEmpty) {
+                                      for (int i = 0; i < _chunksMetadata.length; i++) {
+                                        if (_chunksMetadata[i].text.toLowerCase().contains(q)) _searchMatches.add(i);
+                                      }
+                                      if (_searchMatches.isNotEmpty) _scrollToCurrentChunk(_searchMatches[0], force: true);
+                                    }
+                                    setState(() {});
+                                  },
+                                  onPrev: () => setState(() {
+                                    if (_searchMatches.isEmpty) return;
+                                    _searchMatchIndex = (_searchMatchIndex - 1 + _searchMatches.length) % _searchMatches.length;
+                                    _scrollToCurrentChunk(_searchMatches[_searchMatchIndex], force: true);
+                                  }),
+                                  onNext: () => setState(() {
+                                    if (_searchMatches.isEmpty) return;
+                                    _searchMatchIndex = (_searchMatchIndex + 1) % _searchMatches.length;
+                                    _scrollToCurrentChunk(_searchMatches[_searchMatchIndex], force: true);
+                                  }),
+                                ),
                               ),
-                            ),
-                          if (_isFullscreen && _tocEntries.isNotEmpty)
-                            Positioned(top: 16, left: 16, child: _buildTocButton(context)),
-                        ],
+                            if (_isUserScrolling && !_isFullscreen)
+                              Positioned(
+                                bottom: 16, right: 16,
+                                child: FloatingActionButton.small(
+                                  onPressed: _recenterToCurrentChunk,
+                                  backgroundColor: const Color(0xFF1A73E8),
+                                  foregroundColor: Colors.white,
+                                  child: const Icon(Icons.center_focus_strong_rounded),
+                                ),
+                              ),
+                            if (_isFullscreen)
+                              Positioned(
+                                top: 16, right: 16,
+                                child: Container(
+                                  decoration: BoxDecoration(color: (_isDark ? Colors.black.withValues(alpha: 0.7) : Colors.white.withValues(alpha: 0.9)), shape: BoxShape.circle),
+                                  child: IconButton(
+                                    icon: Icon(Icons.fullscreen_exit_rounded, color: _isDark ? Colors.white : Colors.black87),
+                                    onPressed: () => setState(() => _isFullscreen = false),
+                                  ),
+                                ),
+                              ),
+                            if (_isFullscreen)
+                              Positioned(
+                                bottom: 20, right: 16,
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    if (_isUserScrolling) ...[
+                                      FloatingActionButton.small(
+                                        onPressed: _recenterToCurrentChunk,
+                                        backgroundColor: const Color(0xFF1A73E8),
+                                        foregroundColor: Colors.white,
+                                        child: const Icon(Icons.center_focus_strong_rounded),
+                                      ),
+                                      const SizedBox(height: 10),
+                                    ],
+                                    // Mini playback island — black on white, slightly larger
+                                    Container(
+                                      decoration: BoxDecoration(
+                                        color: _isDark ? const Color(0xFF2C2C2C) : Colors.white,
+                                        borderRadius: BorderRadius.circular(28),
+                                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 12, offset: const Offset(0, 3))],
+                                      ),
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                        IconButton(
+                                          icon: Icon(Icons.replay_10_rounded, size: 26, color: _isDark ? Colors.white70 : Colors.black87),
+                                          onPressed: _isBusy ? () => _seekRelative(-10) : null,
+                                          padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                        ),
+                                        IconButton(
+                                          icon: Icon(
+                                            _isBusy ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                                            size: 28, color: _isDark ? Colors.white70 : Colors.black87,
+                                          ),
+                                          onPressed: _isReady ? (_isBusy ? _stopPdfReading : _startPdfReading) : null,
+                                          padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                        ),
+                                        IconButton(
+                                          icon: Icon(Icons.forward_10_rounded, size: 26, color: _isDark ? Colors.white70 : Colors.black87),
+                                          onPressed: _isBusy ? () => _seekRelative(10) : null,
+                                          padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                                        ),
+                                      ]),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            if (_isFullscreen && _tocEntries.isNotEmpty)
+                              Positioned(top: 16, left: 16, child: _buildTocButton(context)),
+                          ],
+                        ),
                       ),
-                    ),
-                    if (!_isParsingPdf && !_isFullscreen)
-                      AudioPlayerBar(
-                        isReady: _isReady,
-                        isBusy: _isBusy,
-                        isCompleted: isCompleted,
-                        showJumpButton: showJumpButton,
-                        progress: progress,
-                        volume: _volume,
-                        playbackSpeed: _playbackSpeed,
-                        speedOpen: _speedOpen,
-                        currentChunkIndex: _currentChunkIndex,
-                        totalChunks: _chunksMetadata.length,
-                        currentPdfPage: globalCurrentPdfPage,
-                        totalPdfPages: globalTotalPdfPages,
-                        isPdfLayout: globalIsOriginalLayout,
-                        isTxtFile: _isTxtFile,
-                        etaRead: _etaString(0, _currentChunkIndex, _playbackSpeed),
-                        etaLeft: _etaString(_currentChunkIndex, _chunksMetadata.length, _playbackSpeed),
-                        onPlay: _startPdfReading,
-                        onPause: _stopPdfReading,
-                        onRestart: _restartAudioFromBeginning,
-                        onJump: _jumpToSelectedAndPlay,
-                        onSeekBack: () => _seekRelative(-10),
-                        onSeekForward: () => _seekRelative(10),
-                        onMute: _toggleMute,
-                        onVolumeChanged: _changeVolume,
-                        speedLayerLink: _speedLayerLink,
-                        onSpeedTap: _toggleSpeedOverlay,
-                      ),
-                  ],
+                      if (!_isParsingPdf && !_isFullscreen)
+                        Container(
+                          decoration: BoxDecoration(
+                            color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
+                            border: Border(top: BorderSide(color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200, width: 1)),
+                          ),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          child: AudioPlayerBar(
+                            isReady: _isReady,
+                            isBusy: _isBusy,
+                            isCompleted: isCompleted,
+                            showJumpButton: showJumpButton,
+                            progress: progress,
+                            volume: _volume,
+                            playbackSpeed: _playbackSpeed,
+                            speedOpen: _speedOpen,
+                            currentChunkIndex: _currentChunkIndex,
+                            totalChunks: _chunksMetadata.length,
+                            currentPdfPage: globalCurrentPdfPage,
+                            totalPdfPages: globalTotalPdfPages,
+                            isPdfLayout: globalIsOriginalLayout,
+                            isTxtFile: _isTxtFile,
+                            etaRead: _etaString(0, _currentChunkIndex, _playbackSpeed),
+                            etaLeft: _etaString(_currentChunkIndex, _chunksMetadata.length, _playbackSpeed),
+                            onPlay: _startPdfReading,
+                            onPause: _stopPdfReading,
+                            onRestart: _restartAudioFromBeginning,
+                            onJump: _jumpToSelectedAndPlay,
+                            onSeekBack: () => _seekRelative(-10),
+                            onSeekForward: () => _seekRelative(10),
+                            onMute: _toggleMute,
+                            onVolumeChanged: _changeVolume,
+                            speedLayerLink: _speedLayerLink,
+                            onSpeedTap: _toggleSpeedOverlay,
+                            isDark: _isDark,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-      ), // Theme
+        ), // Theme
+      ), // ValueListenableBuilder
     );
   }
 }
