@@ -26,8 +26,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _importStatus = '';
   double _importProgress = 0.0;
 
-  // Mini player state (mirrors what's active in SpeechTestView)
-  double _volume = 1.0;
+  // Speed overlay state for AudioPlayerBar
+  final LayerLink _speedLayerLink = LayerLink();
+  bool _speedOpen = false;
+  OverlayEntry? _speedOverlay;
+  double _playbackSpeed = 1.0;
 
   bool get _isDark {
     final mode = appThemeNotifier.value;
@@ -41,11 +44,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _loadHistory();
     appThemeNotifier.addListener(_onThemeChanged);
+    // Load saved playback speed
+    SharedPreferences.getInstance().then((prefs) {
+      // Prefer the active book's speed over the generic dashboard speed
+      final activeId = globalActiveBookId;
+      double s;
+      if (activeId != null) {
+        s = prefs.getDouble('speed_$activeId') ?? prefs.getDouble('dashboard_speed') ?? 1.0;
+      } else {
+        s = prefs.getDouble('dashboard_speed') ?? 1.0;
+      }
+      if (mounted) setState(() => _playbackSpeed = s);
+    });
   }
 
   @override
   void dispose() {
     appThemeNotifier.removeListener(_onThemeChanged);
+    _speedOverlay?.remove();
     super.dispose();
   }
 
@@ -71,7 +87,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Future<String?> _generatePdfCover(String pdfPath, String bookId) async {
     try {
-      if (pdfPath.toLowerCase().endsWith('.txt')) return null;
+      final ext = pdfPath.toLowerCase();
+      if (ext.endsWith('.txt') || ext.endsWith('.doc') || ext.endsWith('.docx')) return null;
       final document = await pdfx.PdfDocument.openFile(pdfPath);
       final page = await document.getPage(1);
       final pageImage = await page.render(
@@ -104,14 +121,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Future<void> _importNewBook() async {
     try {
-      final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['pdf', 'txt']);
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf', 'txt', 'doc', 'docx'],
+      );
       if (result == null || result.files.single.path == null) return;
       setState(() { _isImporting = true; _importStatus = 'Čtu soubor...'; _importProgress = 0.0; });
       await _smoothProgress(0.08);
       final filePath = result.files.single.path!;
       final file = File(filePath);
+      final ext = filePath.toLowerCase();
       int wordCount = 0; int chunkCount = 0;
-      if (filePath.toLowerCase().endsWith('.txt')) {
+
+      if (ext.endsWith('.txt')) {
         setState(() { _importStatus = 'Analyzuji text...'; });
         await _smoothProgress(0.25);
         final content = await file.readAsString();
@@ -120,6 +142,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           if (s.trim().isNotEmpty) { wordCount += s.trim().split(RegExp(r'\s+')).length; chunkCount++; }
         }
         await _smoothProgress(0.72);
+      } else if (ext.endsWith('.doc') || ext.endsWith('.docx')) {
+        // docx: treat as text — SpeechTestView handles actual parsing
+        setState(() { _importStatus = 'Čtu Word dokument...'; });
+        await _smoothProgress(0.60);
+        wordCount = 100; chunkCount = 10; // placeholder; real count done on open
+        await _smoothProgress(0.90);
       } else {
         setState(() { _importStatus = 'Čtu PDF...'; });
         await _smoothProgress(0.12);
@@ -162,11 +190,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _openBook(BookModel book) async {
-    // Pre-check file existence
-    if (!File(book.filePath).existsSync()) {
-      _showFileMissingDialog(book);
-      return;
-    }
+    if (!File(book.filePath).existsSync()) { _showFileMissingDialog(book); return; }
     final int targetIdx = _books.indexWhere((b) => b.id == book.id);
     if (targetIdx != -1) {
       setState(() { _books.removeAt(targetIdx); _books.insert(0, book); });
@@ -177,10 +201,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (context) => SpeechTestView(book: book)),
     ).then((_) async {
-      if (!Platform.isAndroid && !Platform.isIOS) {
+      // Only stop if audio is NOT globally busy (i.e. user stopped in SpeechTestView)
+      // If still busy, let it continue — the dashboard AudioPlayerBar will show controls
+      if (!globalIsAudioBusy && !Platform.isAndroid && !Platform.isIOS) {
         try { await windowsPlayer.stop(); } catch (_) {}
       }
-      if (mounted) setState(() {});
+      // Sync speed from whatever SpeechTestView last used
+      if (mounted) {
+        final prefs = await SharedPreferences.getInstance();
+        final activeId = globalActiveBookId;
+        if (activeId != null) {
+          final s = prefs.getDouble('speed_$activeId') ?? 1.0;
+          setState(() => _playbackSpeed = s);
+        } else {
+          setState(() {});
+        }
+      }
     });
   }
 
@@ -195,24 +231,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ]),
         content: Text('Soubor „${book.title}" byl přesunut nebo smazán.\n\nCo chcete udělat?'),
         actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Zrušit')),
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Zrušit'),
-          ),
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              _deleteBook(book);
-            },
-            child: Text('Odstranit ze seznamu', style: TextStyle(color: Colors.red.shade600)),
+            onPressed: () async { Navigator.pop(ctx); _deleteBook(book); },
+            child: Text('Odstranit', style: TextStyle(color: Colors.red.shade600)),
           ),
           ElevatedButton.icon(
             icon: const Icon(Icons.folder_open_rounded, size: 16),
-            label: const Text('Dohledat soubor'),
-            onPressed: () async {
-              Navigator.pop(ctx);
-              _showRelinkDialog(book);
-            },
+            label: const Text('Dohledat'),
+            onPressed: () async { Navigator.pop(ctx); _showRelinkDialog(book); },
           ),
         ],
       ),
@@ -230,14 +257,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ElevatedButton(
             onPressed: () async {
               Navigator.pop(context);
-              final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['pdf', 'txt']);
+              final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['pdf', 'txt', 'doc', 'docx']);
               if (result != null && result.files.single.path != null) {
                 final newPath = result.files.single.path!;
                 final String? newCover = await _generatePdfCover(newPath, book.id);
-                setState(() {
-                  book.filePath = newPath;
-                  if (newCover != null) book.coverPath = newCover;
-                });
+                setState(() { book.filePath = newPath; if (newCover != null) book.coverPath = newCover; });
                 await _saveHistory();
                 _openBook(book);
               }
@@ -260,10 +284,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Zrušit')),
           ElevatedButton(
             onPressed: () async {
-              if (controller.text.trim().isNotEmpty) {
-                setState(() { book.title = controller.text.trim(); });
-                await _saveHistory();
-              }
+              if (controller.text.trim().isNotEmpty) { setState(() { book.title = controller.text.trim(); }); await _saveHistory(); }
               if (mounted) Navigator.pop(context);
             },
             child: const Text('Uložit'),
@@ -274,8 +295,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _openFileLocation(BookModel book) async {
-    final file = File(book.filePath);
-    if (!file.existsSync()) { _showFileMissingDialog(book); return; }
+    if (!File(book.filePath).existsSync()) { _showFileMissingDialog(book); return; }
     if (Platform.isWindows) {
       await Process.run('explorer.exe', ['/select,', book.filePath]);
     } else if (Platform.isAndroid) {
@@ -314,8 +334,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _saveHistory();
   }
 
-  // ─── Mini player helpers ────────────────────────────────────────────────────
-
   void _seekRelative(int seconds) async {
     if (!globalIsAudioBusy) return;
     final player = (Platform.isAndroid || Platform.isIOS) ? audioHandler.player : windowsPlayer;
@@ -324,23 +342,104 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final duration = player.duration;
     if (duration != null) {
       if (targetPos < Duration.zero) { player.seek(Duration.zero); }
-      else if (targetPos > duration) { globalCurrentChunkIndex++; globalCurrentWordIndex = 0; setState(() {}); }
+      else if (targetPos > duration) { /* let it naturally complete */ }
       else { player.seek(targetPos); }
     }
   }
 
-  void _changeVolume(double vol) async {
-    setState(() { _volume = vol; });
-    if (Platform.isAndroid || Platform.isIOS) { await audioHandler.player.setVolume(vol); }
-    else { await windowsPlayer.setVolume(vol); }
+  // Speed overlay — reuse same pattern as SpeechTestView
+  void _toggleSpeedOverlay(BuildContext context) {
+    if (_speedOpen) { _closeSpeedOverlay(); } else { _openSpeedOverlay(context); }
   }
 
-  void _restartAudioFromBeginning() async {
-    if (Platform.isAndroid || Platform.isIOS) { await audioHandler.stop(); } else { await windowsPlayer.stop(); }
-    setState(() { globalIsAudioBusy = true; globalCurrentChunkIndex = 0; globalCurrentWordIndex = 0; });
+  void _openSpeedOverlay(BuildContext context) {
+    _speedOverlay?.remove();
+    _speedOpen = true;
+    if (mounted) setState(() {});
+    _speedOverlay = OverlayEntry(builder: (ctx) {
+      const double rangeMin = 0.5;
+      const double rangeMax = 4.0;
+      const List<double> presets = [0.8, 1.0, 1.2, 1.5, 2.0, 2.5];
+      return Stack(fit: StackFit.expand, children: [
+        SizedBox.expand(child: GestureDetector(behavior: HitTestBehavior.translucent, onTap: _closeSpeedOverlay)),
+        UnconstrainedBox(child: CompositedTransformFollower(
+          link: _speedLayerLink,
+          showWhenUnlinked: false,
+          targetAnchor: Alignment.topRight,
+          followerAnchor: Alignment.bottomRight,
+          offset: const Offset(0, -6),
+          child: Material(
+            color: Colors.transparent,
+            child: StatefulBuilder(builder: (_, setLocal) {
+              final bool dm = _isDark;
+              return Container(
+                width: 192,
+                decoration: BoxDecoration(
+                  color: dm ? const Color(0xFF2C2C2C) : Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 18, offset: const Offset(0, 4))],
+                  border: Border.all(color: dm ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
+                ),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                    child: Row(children: [
+                      Icon(Icons.speed_rounded, size: 13, color: dm ? Colors.white54 : const Color(0xFF5F6368)),
+                      const SizedBox(width: 5),
+                      Expanded(child: Text('Rychlost čtení',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: dm ? Colors.white : const Color(0xFF1F1F1F)))),
+                    ]),
+                  ),
+                  const Divider(height: 1, thickness: 0.5),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                    child: GridView.count(
+                      crossAxisCount: 3, shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      mainAxisSpacing: 6, crossAxisSpacing: 6, childAspectRatio: 2.2,
+                      children: presets.map((spd) {
+                        final bool active = (_playbackSpeed - spd).abs() < 0.01;
+                        return GestureDetector(
+                          onTap: () {
+                            setState(() => _playbackSpeed = spd);
+                            setLocal(() {});
+                            SharedPreferences.getInstance().then((p) => p.setDouble('dashboard_speed', spd));
+                            if (globalIsAudioBusy) {
+                              if (Platform.isAndroid || Platform.isIOS) { audioHandler.player.setSpeed(spd); }
+                              else { windowsPlayer.setSpeed(spd); }
+                            }
+                          },
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 100),
+                            decoration: BoxDecoration(
+                              color: active ? const Color(0xFF1A73E8) : (dm ? const Color(0xFF3C3C3C) : const Color(0xFFF1F3F4)),
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(spd % 1 == 0 ? '${spd.toInt()}x' : '${spd}x',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                                    color: active ? Colors.white : (dm ? Colors.white70 : Colors.black87))),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ]),
+              );
+            }),
+          ),
+        )),
+      ]);
+    });
+    Overlay.of(context).insert(_speedOverlay!);
   }
 
-  // ─── Dark mode ──────────────────────────────────────────────────────────────
+  void _closeSpeedOverlay() {
+    _speedOverlay?.remove();
+    _speedOverlay = null;
+    _speedOpen = false;
+    if (mounted) setState(() {});
+  }
 
   void _setTheme(int mode) {
     appThemeNotifier.value = mode;
@@ -348,7 +447,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
     setState(() {});
   }
 
-  // ─── Build ──────────────────────────────────────────────────────────────────
+  // ─── File type icon helper ──────────────────────────────────────────────────
+  IconData _fileIcon(String path) {
+    final ext = path.toLowerCase();
+    if (ext.endsWith('.txt')) return Icons.description_rounded;
+    if (ext.endsWith('.doc') || ext.endsWith('.docx')) return Icons.article_rounded;
+    return Icons.picture_as_pdf_rounded;
+  }
+  Color _fileIconColor(String path, bool exists) {
+    if (!exists) return Colors.grey;
+    final ext = path.toLowerCase();
+    if (ext.endsWith('.txt')) return Colors.blue.shade600;
+    if (ext.endsWith('.doc') || ext.endsWith('.docx')) return Colors.indigo.shade600;
+    return Colors.red.shade600;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -357,6 +469,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final textPrimary = _isDark ? Colors.white : const Color(0xFF1F1F1F);
     final textSecondary = _isDark ? Colors.white60 : const Color(0xFF5F6368);
     final dividerColor = _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200;
+    final badgeBg = _isDark ? Colors.white.withValues(alpha: 0.15) : Colors.white.withValues(alpha: 0.9);
 
     BookModel? activeBook;
     bool isCompleted = false;
@@ -370,6 +483,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         globalIsAudioBusy = false;
       }
     }
+    final double progress = activeBook != null && activeBook.totalChunks > 0
+        ? (globalCurrentChunkIndex / activeBook.totalChunks).clamp(0.0, 1.0)
+        : 0.0;
 
     return Scaffold(
       backgroundColor: scaffoldBg,
@@ -380,14 +496,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
         elevation: 0,
         shape: Border(bottom: BorderSide(color: dividerColor, width: 1)),
         title: Row(children: [
-          Image.asset('assets/icon/fg.png', width: 36, height: 36, fit: BoxFit.contain),
+          // Logo — always same 4px padding (prevents layout shift on mode change)
+          Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: _isDark ? Colors.white.withValues(alpha: 0.90) : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Image.asset('assets/icon/fg.png', width: 32, height: 32, fit: BoxFit.contain),
+          ),
+          const SizedBox(width: 10),  // 8px + slight breathing room
           Text('Open Voice Reader', style: TextStyle(
             fontWeight: FontWeight.w700, fontSize: 18, letterSpacing: -0.5,
             color: _isDark ? Colors.white : const Color(0xFF164063),
           )),
         ]),
         actions: [
-          // Dark mode toggle
           PopupMenuButton<int>(
             tooltip: 'Vzhled',
             icon: Icon(
@@ -427,9 +551,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  // Import button
+                  // Import button — dark-mode aware
                   Material(
-                    color: cardBg,
+                    color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
                     borderRadius: BorderRadius.circular(16),
                     child: InkWell(
                       onTap: _isImporting ? null : _importNewBook,
@@ -440,7 +564,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         height: _isImporting ? 118 : 110,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.blue.shade200, width: 1.5),
+                          border: Border.all(
+                            color: _isDark ? const Color(0xFF1A73E8).withValues(alpha: 0.5) : Colors.blue.shade200,
+                            width: 1.5,
+                          ),
                         ),
                         child: _isImporting
                             ? Padding(
@@ -450,19 +577,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF1A73E8))),
                               const SizedBox(width: 10),
                               Expanded(child: Text(_importStatus, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12, color: Color(0xFF1A73E8)))),
-                              Text('${(_importProgress * 100).toStringAsFixed(0)}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF5F6368))),
+                              Text('${(_importProgress * 100).toStringAsFixed(0)}%', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: textSecondary)),
                             ]),
                             const SizedBox(height: 8),
                             ClipRRect(borderRadius: BorderRadius.circular(3),
-                                child: LinearProgressIndicator(value: _importProgress, minHeight: 4, backgroundColor: Colors.blue.shade50, color: const Color(0xFF1A73E8))),
+                                child: LinearProgressIndicator(
+                                  value: _importProgress, minHeight: 4,
+                                  backgroundColor: _isDark ? const Color(0xFF3A3A3A) : Colors.blue.shade50,
+                                  color: const Color(0xFF1A73E8),
+                                )),
                           ]),
                         )
                             : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                          Container(padding: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(color: Colors.blue.shade50, shape: BoxShape.circle),
-                              child: const Icon(Icons.add_rounded, size: 28, color: Color(0xFF1A73E8))),
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: _isDark ? const Color(0xFF1A73E8).withValues(alpha: 0.15) : Colors.blue.shade50,
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.add_rounded, size: 28, color: Color(0xFF1A73E8)),
+                          ),
                           const SizedBox(height: 10),
-                          const Text('Otevřít nový PDF nebo TXT dokument', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1A73E8))),
+                          Text('Otevřít PDF, TXT nebo Word dokument',
+                              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14,
+                                  color: _isDark ? const Color(0xFF1A73E8) : const Color(0xFF1A73E8))),
                         ]),
                       ),
                     ),
@@ -487,9 +625,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   delegate: SliverChildBuilderDelegate(
                         (context, index) {
                       final book = _books[index];
-                      final double progress = book.totalChunks > 0 ? book.lastChunkIndex / book.totalChunks : 0.0;
+                      final double bookProgress = book.totalChunks > 0 ? book.lastChunkIndex / book.totalChunks : 0.0;
                       final bool hasCover = book.coverPath != null && File(book.coverPath!).existsSync();
-                      final bool isTxt = book.filePath.toLowerCase().endsWith('.txt');
 
                       return FutureBuilder<bool>(
                         future: File(book.filePath).exists(),
@@ -512,7 +649,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     child: Stack(children: [
                                       Positioned.fill(
                                         child: !exists
-                                        // ── File missing state ──
                                             ? Container(
                                           color: _isDark ? const Color(0xFF2C2C2C) : Colors.grey.shade100,
                                           child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -530,35 +666,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                             : hasCover
                                             ? Image.file(File(book.coverPath!), fit: BoxFit.cover, alignment: Alignment.topCenter)
                                             : Container(
-                                          color: isTxt ? const Color(0xFFE8F0FE) : Colors.grey.shade100,
-                                          child: Icon(
-                                            isTxt ? Icons.description_rounded : Icons.picture_as_pdf_rounded,
-                                            color: isTxt ? Colors.blue.shade600 : Colors.red.shade300,
-                                            size: 48,
-                                          ),
+                                          color: _isDark ? const Color(0xFF2A2A2A) : Colors.grey.shade100,
+                                          child: Icon(_fileIcon(book.filePath),
+                                              color: _fileIconColor(book.filePath, exists), size: 48),
                                         ),
                                       ),
-                                      // Type badge
+                                      // Type badge — dark bg
                                       Positioned(top: 8, left: 8,
                                         child: Container(
                                           padding: const EdgeInsets.all(6),
-                                          decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.9), borderRadius: BorderRadius.circular(8)),
-                                          child: Icon(
-                                            isTxt ? Icons.description_rounded : Icons.picture_as_pdf_rounded,
-                                            color: exists ? (isTxt ? Colors.blue.shade700 : Colors.red.shade600) : Colors.grey,
-                                            size: 16,
-                                          ),
+                                          decoration: BoxDecoration(color: badgeBg, borderRadius: BorderRadius.circular(8)),
+                                          child: Icon(_fileIcon(book.filePath),
+                                              color: _fileIconColor(book.filePath, exists), size: 16),
                                         ),
                                       ),
-                                      // Options menu
+                                      // Options menu — dark bg
                                       Positioned(top: 8, right: 8,
                                         child: Container(
-                                          decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.9), shape: BoxShape.circle),
+                                          decoration: BoxDecoration(color: badgeBg, shape: BoxShape.circle),
                                           child: PopupMenuButton<String>(
                                             padding: EdgeInsets.zero,
                                             constraints: const BoxConstraints(),
                                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                            icon: const Icon(Icons.more_vert_rounded, size: 18, color: Color(0xFF5F6368)),
+                                            icon: Icon(Icons.more_vert_rounded, size: 18,
+                                                color: _isDark ? Colors.white70 : const Color(0xFF5F6368)),
                                             onSelected: (value) {
                                               if (value == 'open') _openBook(book);
                                               if (value == 'rename') _showRenameDialog(book);
@@ -589,12 +720,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                                         Expanded(child: ClipRRect(
                                           borderRadius: BorderRadius.circular(4),
-                                          child: LinearProgressIndicator(value: progress.clamp(0.0, 1.0),
+                                          child: LinearProgressIndicator(value: bookProgress.clamp(0.0, 1.0),
                                               backgroundColor: _isDark ? Colors.white.withValues(alpha: 0.1) : Colors.grey.shade100,
                                               color: const Color(0xFF1A73E8), minHeight: 5),
                                         )),
                                         const SizedBox(width: 10),
-                                        Text('${(progress * 100).toStringAsFixed(0)}%',
+                                        Text('${(bookProgress * 100).toStringAsFixed(0)}%',
                                             style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: textSecondary)),
                                       ]),
                                     ]),
@@ -613,19 +744,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ]),
         ),
       ),
-      // Mini player at bottom when audio is active
+      // Bottom player — uses the same AudioPlayerBar as SpeechTestView
       bottomNavigationBar: activeBook == null ? null : Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         decoration: BoxDecoration(
           color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
           border: Border(top: BorderSide(color: dividerColor, width: 1)),
           boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, -3))],
         ),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         child: SafeArea(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            // Active book title
+            // Book title
             Padding(
-              padding: const EdgeInsets.only(bottom: 4),
+              padding: const EdgeInsets.only(bottom: 2),
               child: Row(children: [
                 Icon(Icons.menu_book_rounded, size: 13, color: const Color(0xFF1A73E8)),
                 const SizedBox(width: 6),
@@ -633,60 +764,45 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: textPrimary))),
               ]),
             ),
-            // Reuse AudioPlayerBar — but dashboard has no LayerLink for speed overlay
-            // so we use a simpler inline bar here
-            Row(children: [
-              // Progress
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                ClipRRect(borderRadius: BorderRadius.circular(2),
-                    child: LinearProgressIndicator(
-                      value: (activeBook.totalChunks > 0 ? globalCurrentChunkIndex / activeBook.totalChunks : 0.0).clamp(0.0, 1.0),
-                      backgroundColor: _isDark ? const Color(0xFF2C2C2C) : Colors.grey.shade200,
-                      color: const Color(0xFF1A73E8), minHeight: 3,
-                    )),
-                const SizedBox(height: 4),
-                Text(
-                  isCompleted ? 'Hotovo'
-                      : 'Blok ${globalCurrentChunkIndex + 1} / ${activeBook.totalChunks}',
-                  style: TextStyle(fontSize: 10, color: textSecondary, fontWeight: FontWeight.w500),
-                ),
-              ])),
-              const SizedBox(width: 12),
-              // Controls
-              IconButton(icon: const Icon(Icons.replay_10_rounded, size: 22), padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                  onPressed: globalIsAudioBusy ? () => _seekRelative(-10) : null),
-              SizedBox(width: 44, height: 44,
-                child: Material(type: MaterialType.transparency,
-                  child: InkWell(
-                    customBorder: const CircleBorder(),
-                    onTap: () {
-                      if (isCompleted) { _restartAudioFromBeginning(); return; }
-                      setState(() { globalIsAudioBusy = !globalIsAudioBusy; });
-                      if (!globalIsAudioBusy) {
-                        if (Platform.isAndroid || Platform.isIOS) { audioHandler.stop(); } else { windowsPlayer.stop(); }
-                      } else {
-                        if (Platform.isAndroid || Platform.isIOS) { audioHandler.play(); } else { windowsPlayer.play(); }
-                      }
-                    },
-                    child: Stack(alignment: Alignment.center, children: [
-                      Container(width: 40, height: 40, decoration: BoxDecoration(
-                        color: isCompleted ? const Color(0xFF1A73E8) : (globalIsAudioBusy ? Colors.red.shade600 : const Color(0xFF1A73E8)),
-                        shape: BoxShape.circle,
-                      )),
-                      Icon(
-                        isCompleted ? Icons.replay_rounded
-                            : (globalIsAudioBusy ? Icons.pause_rounded : Icons.play_arrow_rounded),
-                        color: Colors.white, size: 22,
-                      ),
-                    ]),
-                  ),
-                ),
-              ),
-              IconButton(icon: const Icon(Icons.forward_10_rounded, size: 22), padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                  onPressed: globalIsAudioBusy ? () => _seekRelative(10) : null),
-            ]),
+            // Identical AudioPlayerBar
+            AudioPlayerBar(
+              isReady: true,
+              isBusy: globalIsAudioBusy,
+              isCompleted: isCompleted,
+              showJumpButton: false,
+              progress: progress,
+              volume: 1.0,
+              playbackSpeed: _playbackSpeed,
+              speedOpen: _speedOpen,
+              currentChunkIndex: globalCurrentChunkIndex,
+              totalChunks: activeBook.totalChunks,
+              currentPdfPage: globalCurrentPdfPage,
+              totalPdfPages: globalTotalPdfPages,
+              isPdfLayout: globalIsOriginalLayout,
+              isTxtFile: activeBook.filePath.toLowerCase().endsWith('.txt'),
+              etaRead: '',
+              etaLeft: '',
+              onPlay: () {
+                setState(() => globalIsAudioBusy = true);
+                if (Platform.isAndroid || Platform.isIOS) { audioHandler.play(); } else { windowsPlayer.play(); }
+              },
+              onPause: () {
+                setState(() => globalIsAudioBusy = false);
+                if (Platform.isAndroid || Platform.isIOS) { audioHandler.pause(); } else { windowsPlayer.stop(); }
+              },
+              onRestart: () {
+                setState(() { globalIsAudioBusy = true; globalCurrentChunkIndex = 0; globalCurrentWordIndex = 0; });
+                if (Platform.isAndroid || Platform.isIOS) { audioHandler.play(); } else { windowsPlayer.play(); }
+              },
+              onJump: null,
+              onSeekBack: () => _seekRelative(-10),
+              onSeekForward: () => _seekRelative(10),
+              onMute: null,
+              onVolumeChanged: (_) {},
+              speedLayerLink: _speedLayerLink,
+              onSpeedTap: _toggleSpeedOverlay,
+              isDark: _isDark,
+            ),
           ]),
         ),
       ),

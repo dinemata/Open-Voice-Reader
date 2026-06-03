@@ -329,6 +329,7 @@ class _VerticalSpeedSlider extends StatelessWidget {
   final double min;
   final double max;
   final double height;
+  final Color inactiveColor;
   final void Function(double) onChanged;
 
   const _VerticalSpeedSlider({
@@ -336,6 +337,7 @@ class _VerticalSpeedSlider extends StatelessWidget {
     required this.min,
     required this.max,
     required this.height,
+    this.inactiveColor = const Color(0xFFBBBBBB),
     required this.onChanged,
   });
 
@@ -348,7 +350,6 @@ class _VerticalSpeedSlider extends StatelessWidget {
       onVerticalDragUpdate: (d) {
         final RenderBox box = context.findRenderObject() as RenderBox;
         final localY = box.globalToLocal(d.globalPosition).dy.clamp(0.0, height);
-        // Top = max, bottom = min
         final frac = 1.0 - (localY / height);
         onChanged(min + frac * (max - min));
       },
@@ -364,7 +365,7 @@ class _VerticalSpeedSlider extends StatelessWidget {
           painter: _VerticalSliderPainter(
             fraction: _clampedFrac(),
             activeColor: const Color(0xFF1A73E8),
-            inactiveColor: const Color(0xFFE8EAED),
+            inactiveColor: inactiveColor,
           ),
         ),
       ),
@@ -394,7 +395,8 @@ class _VerticalSliderPainter extends CustomPainter {
     final pillRect = RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, w, h), Radius.circular(radius));
 
     // Background — dark grey, works in both light and dark mode
-    canvas.drawRRect(pillRect, Paint()..color = const Color(0xFFCCCCCC));
+    // Background uses inactiveColor passed in
+    canvas.drawRRect(pillRect, Paint()..color = inactiveColor);
 
     // Active fill from bottom
     if (filledH > 0) {
@@ -745,7 +747,7 @@ class AudioPlayerBar extends StatelessWidget {
                 ),
               )),
               if (!isPhone && !Platform.isAndroid && !Platform.isIOS) ...[
-                const SizedBox(width: 4),
+                const SizedBox(width: 1),
                 IconButton(
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(),
@@ -922,6 +924,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _pdfVertScrollController.addListener(_onPdfScroll);
       _pdfHorizScrollController.addListener(_onPdfScroll);
+      // Recentre whenever the screen is first built (handles returning from background)
+      if (_isReady && mounted) _recenterToCurrentChunk();
       // Compute screen-adaptive baseline zoom: ~0.8 on a 400 px wide screen,
       // scaling proportionally so smaller screens get a larger baseline fraction.
       // Formula: baseline = (referenceWidth / screenWidth) * referenceBaseline
@@ -991,8 +995,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   @override
   void dispose() {
-    _playbackStateSubscription?.cancel();
-    _positionSubscription?.cancel();
+    // If audio is still playing, keep the listeners alive so _handleTrackComplete
+    // continues to fire and advance chunks while the dashboard is shown.
+    // The subscriptions will be re-cancelled if the user opens this view again
+    // (via _setupAudioListeners) or when reading naturally completes.
+    if (!_isBusy) {
+      _playbackStateSubscription?.cancel();
+      _positionSubscription?.cancel();
+    }
     _pendingJumpTimer?.cancel();
     _itemPositionsListener.itemPositions.removeListener(_scrollListener);
     _pdfVertScrollController.removeListener(_onPdfScroll);
@@ -1686,7 +1696,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         // with the dot or have a comma immediately after. Normalise to "abbrev. " form first.
         String ttsText = rawText;
         // Colon mid-sentence → natural pause/drop
-        ttsText = ttsText.replaceAll(RegExp(r':\s+'), ', ');
+        ttsText = ttsText.replaceAll(RegExp(r':\s+'), '. ');
         ttsText = ttsText.replaceAll(RegExp(r':$'), '.');
         // Normalise abbreviation dots: ensure space follows so DictionaryJirka patterns fire.
         // IMPORTANT: Dart RegExp does NOT support (?i) inline flag — use caseSensitive: false.
@@ -1853,7 +1863,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           width: 3, height: 10,
           margin: const EdgeInsets.symmetric(horizontal: 1),
           decoration: BoxDecoration(
-            color: color.withValues(alpha: color == Colors.transparent ? 0.15 : 1),
+            color: (color == Colors.transparent ? (_isDark ? Colors.white.withValues(alpha: 0.15) : Colors.grey.withValues(alpha: 0.22)) : color),
             borderRadius: BorderRadius.circular(1),
           ),
         );
@@ -2222,7 +2232,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               : appThemeNotifier.value == 1 ? Icons.light_mode_rounded
               : Icons.dark_mode_rounded,
           size: 20,
-          color: appThemeNotifier.value != 0 ? const Color(0xFF1A73E8) : const Color(0xFF5F6368),
+          color: appThemeNotifier.value != 0 ? const Color(0xFF1A73E8) : (_isDark ? const Color(0xFFE0E0E0) : const Color(0xFF5F6368)),
         ),
         onPressed: () => _toggleThemeOverlay(context),
       ),
@@ -2243,7 +2253,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         CompositedTransformTarget(link: _parametryLayerLink,
           child: IconButton(tooltip: 'Parametry',
             icon: Icon(Icons.tune_rounded,
-                color: (_skipParentheses || _skipLinks || _skipPageNumbers || _skipSuperscripts) ? Colors.purple.shade400 : const Color(0xFF5F6368),
+                color: (_skipParentheses || _skipLinks || _skipPageNumbers || _skipSuperscripts) ? Colors.purple.shade400 : (_isDark ? const Color(0xFFE0E0E0) : const Color(0xFF5F6368)),
                 size: 20),
             onPressed: () => _toggleParametryOverlay(context),
           ),
@@ -2446,7 +2456,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                         color: isPending
                             ? Colors.orange.withValues(alpha: 0.12)
                             : isActiveChapter
-                            ? Theme.of(ctx).colorScheme.primary.withValues(alpha: 0.1)
+                            ? (_isDark ? Colors.white.withValues(alpha: 0.12) : Theme.of(ctx).colorScheme.primary.withValues(alpha: 0.1))
                             : Colors.transparent,
                         padding: EdgeInsets.fromLTRB(12.0 + (e.level - 1) * 10.0, 9, 12, 9),
                         child: Row(children: [
@@ -2703,6 +2713,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                           min: rangeMin,
                           max: rangeMax,
                           height: 180,
+                          inactiveColor: dm ? const Color(0xFF3E3E3E) : const Color(0xFFBBBBBB),
                           onChanged: (v) {
                             final snapped = (v * 20).round() / 20.0;
                             _changeSpeed(snapped);
@@ -3029,11 +3040,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                       child: Row(children: [
-                        Icon(entry.$2, size: 16, color: appThemeNotifier.value == entry.$1 ? const Color(0xFF1A73E8) : const Color(0xFF5F6368)),
+                        Icon(entry.$2, size: 16, color: appThemeNotifier.value == entry.$1 ? const Color(0xFF1A73E8) : (tdm ? Colors.white54 : const Color(0xFF5F6368))),
                         const SizedBox(width: 10),
                         Expanded(child: Text(entry.$3, style: TextStyle(fontSize: 13,
                             fontWeight: appThemeNotifier.value == entry.$1 ? FontWeight.w700 : FontWeight.w500,
-                            color: appThemeNotifier.value == entry.$1 ? const Color(0xFF1A73E8) : Colors.black87))),
+                            color: appThemeNotifier.value == entry.$1 ? const Color(0xFF1A73E8) : (tdm ? Colors.white70 : Colors.black87)))),
                         if (appThemeNotifier.value == entry.$1) const Icon(Icons.check_rounded, size: 16, color: Color(0xFF1A73E8)),
                       ]),
                     ),
