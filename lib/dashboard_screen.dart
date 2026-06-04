@@ -357,8 +357,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _speedOpen = true;
     if (mounted) setState(() {});
     _speedOverlay = OverlayEntry(builder: (ctx) {
-      const double rangeMin = 0.5;
-      const double rangeMax = 4.0;
       const List<double> presets = [0.8, 1.0, 1.2, 1.5, 2.0, 2.5];
       return Stack(fit: StackFit.expand, children: [
         SizedBox.expand(child: GestureDetector(behavior: HitTestBehavior.translucent, onTap: _closeSpeedOverlay)),
@@ -605,9 +603,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 36),
+                  const SizedBox(height: 12),
                   Text('Nedávné dokumenty', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: -0.5, color: textPrimary)),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 10),
                 ]),
               ),
             ),

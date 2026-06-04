@@ -16,7 +16,6 @@ sherpa.OfflineTts? globalTts;
 String? globalCurrentModelId;
 
 /// Global theme mode notifier — 0 = system, 1 = light, 2 = dark.
-/// Shared between DashboardScreen and SpeechTestView.
 final ValueNotifier<int> appThemeNotifier = ValueNotifier<int>(0);
 
 Future<void> main() async {
@@ -27,7 +26,6 @@ Future<void> main() async {
     debugPrint('[START_ERROR] Bindings fail: $e');
   }
 
-  // Load saved theme mode before first build
   final prefs = await SharedPreferences.getInstance();
   appThemeNotifier.value = prefs.getInt('theme_mode') ?? 0;
 
@@ -56,7 +54,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<int>(
       valueListenable: appThemeNotifier,
-      builder: (context, themeMode, _) {
+      builder: (context, themeMode, child) {
         final ThemeMode mode = themeMode == 1
             ? ThemeMode.light
             : themeMode == 2

@@ -747,14 +747,14 @@ class AudioPlayerBar extends StatelessWidget {
                 ),
               )),
               if (!isPhone && !Platform.isAndroid && !Platform.isIOS) ...[
-                const SizedBox(width: 1),
+                const SizedBox(width: 8),
                 IconButton(
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(),
                   icon: Icon(
                     volume == 0.0 ? Icons.volume_off_rounded
                         : (volume < 0.5 ? Icons.volume_down_rounded : Icons.volume_up_rounded),
-                    size: 18, color: const Color(0xFF5F6368),
+                    size: 18, color: isDark ? const Color(0xFF90CAF9) : const Color(0xFF5F6368),
                   ),
                   onPressed: onMute,
                 ),
@@ -768,8 +768,8 @@ class AudioPlayerBar extends StatelessWidget {
                     ),
                     child: Slider(
                       value: volume, min: 0.0, max: 1.0,
-                      activeColor: Theme.of(context).colorScheme.primary,
-                      inactiveColor: Colors.grey.shade300,
+                      activeColor: isDark ? const Color(0xFF90CAF9) : Theme.of(context).colorScheme.primary,
+                      inactiveColor: isDark ? const Color(0xFF37474F) : Colors.grey.shade300,
                       onChanged: onVolumeChanged,
                     ),
                   ),
@@ -823,6 +823,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   bool _skipLinks = false;
   bool _skipPageNumbers = false;
   bool _skipSuperscripts = false;
+  bool _pdfInvert = false; // invert PDF colours for dark reading
 
   double _textZoomFactor = 1.0;   // default; baseline 1.0 displays as 100%
   double _textBaselineZoom = 1.0; // "100 %" reference for text view
@@ -1059,13 +1060,23 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     if (_isPagesRendering || _isTxtFile) return;
     _isPagesRendering = true;
     _renderedPages.clear();
-    await _pdfRenderService.open(widget.book.filePath);
-
-    for (int i = 1; i <= globalTotalPdfPages; i++) {
-      final renderRes = (displayWidth * 1.0).clamp(400.0, 700.0);
-      final rendered = await _pdfRenderService.renderPage(i, renderRes);
-      if (!mounted) return;
-      setState(() => _renderedPages.add(rendered));
+    try {
+      await _pdfRenderService.open(widget.book.filePath);
+      for (int i = 1; i <= globalTotalPdfPages; i++) {
+        final renderRes = (displayWidth * 1.0).clamp(400.0, 700.0);
+        final rendered = await _pdfRenderService.renderPage(i, renderRes);
+        if (!mounted) { _isPagesRendering = false; return; }
+        setState(() => _renderedPages.add(rendered));
+      }
+    } catch (e) {
+      debugPrint('[PDF_RENDER] Error rendering pages: $e');
+      // On Android, pdfx may fail for certain PDFs — fall back gracefully
+      // to text-only mode without crashing the app
+      if (mounted) {
+        setState(() {
+          globalIsOriginalLayout = false; // fall back to text view
+        });
+      }
     }
     _isPagesRendering = false;
   }
@@ -1335,7 +1346,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         // Update immediately (not via setState future) so next chunk picks it up
         _playbackSpeed = newSpeed;
         SharedPreferences.getInstance().then((p) => p.setDouble('speed_${widget.book.id}', newSpeed));
-        if (mounted) setState(() {});
+        if (mounted) setState(() {}); // safe: mounted check is just for UI update
       }
     }
     _currentWordIndex = 0;
@@ -1369,24 +1380,38 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
   }
 
-  Future<String> _prepareFile(String assetPath, {String? targetPath}) async {
+  Future<String> _prepareFile(String assetPath, {String? targetPath, bool forceOverwrite = false}) async {
     try {
-      final byteData = await rootBundle.load(assetPath);
       final directory = await getApplicationSupportDirectory();
       final finalPath = targetPath ?? assetPath;
       final file = File('${directory.path}/$finalPath');
+      // Skip re-writing if the file already exists and has content, unless forced.
+      // This prevents partial-write corruption on Android when the app is killed mid-copy.
+      if (!forceOverwrite && await file.exists() && await file.length() > 0) {
+        return file.path.replaceAll('\\', '/');
+      }
+      final byteData = await rootBundle.load(assetPath);
       if (!await file.parent.exists()) await file.parent.create(recursive: true);
       final buffer = byteData.buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes);
       await file.writeAsBytes(buffer, flush: true);
       return file.path.replaceAll('\\', '/');
     } catch (e) {
+      debugPrint('[PREPARE_FILE] Error for $assetPath: $e');
       return "";
     }
   }
 
   Future<void> _initEngine() async {
     if (globalCurrentModelId == _selectedModel.id && globalTts != null) {
-      return;
+      // Verify the TTS engine is still usable (Android may GC native objects)
+      try {
+        // Quick sanity check — if this throws, we need to reinitialise
+        final _ = globalTts!.sampleRate;
+        return;
+      } catch (_) {
+        globalTts = null;
+        globalCurrentModelId = null;
+      }
     }
 
     setState(() {
@@ -1445,19 +1470,23 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
       if (modelPath.isEmpty || tokensPath.isEmpty) throw Exception("Error loading assets.");
 
+      // Use fewer threads on mobile to reduce memory pressure
+      final int numThreads = (Platform.isAndroid || Platform.isIOS) ? 2 : 4;
+      final bool debugMode = !(Platform.isAndroid || Platform.isIOS);
+
       if (_selectedModel.id == 'en_kokoro') {
         final extraPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: _selectedModel.configFile);
         modelConfig = sherpa.OfflineTtsModelConfig(
           kokoro: sherpa.OfflineTtsKokoroModelConfig(model: modelPath, voices: extraPath, tokens: tokensPath, dataDir: espeakDataPath),
-          numThreads: 4,
-          debug: true,
+          numThreads: numThreads,
+          debug: debugMode,
         );
       } else {
         await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: '${_selectedModel.id}_config.json');
         modelConfig = sherpa.OfflineTtsModelConfig(
           vits: sherpa.OfflineTtsVitsModelConfig(model: modelPath, tokens: tokensPath, dataDir: espeakDataPath, noiseScale: 0.667, noiseScaleW: 0.8, lengthScale: 1.0),
-          numThreads: 4,
-          debug: true,
+          numThreads: numThreads,
+          debug: debugMode,
         );
       }
 
@@ -1737,9 +1766,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           await windowsPlayer.setVolume(_volume);
           await windowsPlayer.setSpeed(_playbackSpeed);
           await windowsPlayer.setFilePath(wavPath);
-          if (!mounted || !_isBusy) return;
+          if (!_isBusy) return;
           await Future.delayed(const Duration(milliseconds: 150));
-          if (!mounted || !_isBusy) return;
+          if (!_isBusy) return;
           await windowsPlayer.play();
           await windowsPlayer.setSpeed(_playbackSpeed);
         }
@@ -2581,51 +2610,17 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                             child: SizedBox(
                               width: availableWidth,
                               height: totalContentHeight,
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: [
-                                  const SizedBox(height: 16),
-                                  for (final renderedPage in _renderedPages)
-                                    Padding(
-                                      padding: const EdgeInsets.only(bottom: pageGap),
-                                      child: Container(
-                                        margin: const EdgeInsets.symmetric(horizontal: 48.0),
-                                        decoration: BoxDecoration(
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Colors.black.withValues(alpha: 0.5),
-                                              blurRadius: 18,
-                                              spreadRadius: 2,
-                                              offset: const Offset(0, 4),
-                                            ),
-                                          ],
-                                        ),
-                                        child: PdfPageWidget(
-                                          page: renderedPage,
-                                          displayWidth: displayWidth,
-                                          chunks: _chunksMetadata,
-                                          currentChunkIndex: _currentChunkIndex,
-                                          currentWordIndex: _currentWordIndex,
-                                          pendingChunkIndex: _pendingJumpIndex,
-                                          isBusy: _isBusy,
-                                          primaryColor: Theme.of(context).colorScheme.primary,
-                                          skipParentheses: _skipParentheses,
-                                          searchQuery: _searchQuery,
-                                          searchMatchChunks: _searchMatches.toSet(),
-                                          activeSearchChunk: _searchMatches.isNotEmpty ? _searchMatches[_searchMatchIndex] : null,
-                                          onTap: (ci, wi) {
-                                            setState(() {
-                                              _pendingJumpIndex = ci;
-                                              _selectedChunkIndex = ci;
-                                            });
-                                          },
-                                        ),
-                                      ),
-                                    ),
-                                  const SizedBox(height: 16),
-                                ],
-                              ),
+                              child: _pdfInvert
+                                  ? ColorFiltered(
+                                colorFilter: const ColorFilter.matrix(<double>[
+                                  -1,  0,  0, 0, 255,
+                                  0, -1,  0, 0, 255,
+                                  0,  0, -1, 0, 255,
+                                  0,  0,  0, 1,   0,
+                                ]),
+                                child: _buildPdfPagesColumn(availableWidth),
+                              )
+                                  : _buildPdfPagesColumn(availableWidth),
                             ),
                           ),
                         ),
@@ -2638,6 +2633,54 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildPdfPagesColumn(double availableWidth) {
+    const double pageGap = 16.0;
+    final double displayWidth = availableWidth - 96.0;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        const SizedBox(height: 16),
+        for (final renderedPage in _renderedPages)
+          Padding(
+            padding: const EdgeInsets.only(bottom: pageGap),
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 48.0),
+              decoration: BoxDecoration(
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.5),
+                    blurRadius: 18, spreadRadius: 2, offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: PdfPageWidget(
+                page: renderedPage,
+                displayWidth: displayWidth,
+                chunks: _chunksMetadata,
+                currentChunkIndex: _currentChunkIndex,
+                currentWordIndex: _currentWordIndex,
+                pendingChunkIndex: _pendingJumpIndex,
+                isBusy: _isBusy,
+                primaryColor: Theme.of(context).colorScheme.primary,
+                skipParentheses: _skipParentheses,
+                searchQuery: _searchQuery,
+                searchMatchChunks: _searchMatches.toSet(),
+                activeSearchChunk: _searchMatches.isNotEmpty ? _searchMatches[_searchMatchIndex] : null,
+                onTap: (ci, wi) {
+                  setState(() {
+                    _pendingJumpIndex = ci;
+                    _selectedChunkIndex = ci;
+                  });
+                },
+              ),
+            ),
+          ),
+        const SizedBox(height: 16),
+      ],
     );
   }
 
@@ -3050,6 +3093,27 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                     ),
                   ),
                 const SizedBox(height: 4),
+                const Divider(height: 1, thickness: 0.5),
+                // PDF invert toggle — dark text on light pages for night reading
+                InkWell(
+                  onTap: () {
+                    setState(() => _pdfInvert = !_pdfInvert);
+                    setLocal(() {});
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    child: Row(children: [
+                      Icon(Icons.invert_colors_rounded, size: 16,
+                          color: _pdfInvert ? const Color(0xFF1A73E8) : (tdm ? Colors.white54 : const Color(0xFF5F6368))),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text('Invertovat PDF', style: TextStyle(fontSize: 13,
+                          fontWeight: _pdfInvert ? FontWeight.w700 : FontWeight.w500,
+                          color: _pdfInvert ? const Color(0xFF1A73E8) : (tdm ? Colors.white70 : Colors.black87)))),
+                      if (_pdfInvert) const Icon(Icons.check_rounded, size: 16, color: Color(0xFF1A73E8)),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 4),
               ]),
             );
           }),
@@ -3264,7 +3328,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   ),
                 )
                     : Padding(
-                  padding: _isFullscreen ? EdgeInsets.zero : const EdgeInsets.all(16.0),
+                  padding: _isFullscreen ? EdgeInsets.zero : const EdgeInsets.fromLTRB(16, 8, 16, 0),
                   child: Column(
                     children: [
                       Expanded(
@@ -3274,7 +3338,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                               width: double.infinity,
                               decoration: BoxDecoration(
                                 color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
-                                borderRadius: _isFullscreen ? BorderRadius.zero : BorderRadius.circular(16),
+                                borderRadius: _isFullscreen ? BorderRadius.zero : const BorderRadius.vertical(top: Radius.circular(16)),
                                 border: _isFullscreen ? null : Border.all(color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200),
                                 boxShadow: _isFullscreen ? [] : [BoxShadow(color: Colors.black.withValues(alpha: _isDark ? 0.3 : 0.02), blurRadius: 12, offset: const Offset(0, 4))],
                               ),
@@ -3539,8 +3603,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                           decoration: BoxDecoration(
                             color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
                             border: Border(top: BorderSide(color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200, width: 1)),
+                            borderRadius: _isFullscreen ? BorderRadius.zero : const BorderRadius.vertical(bottom: Radius.circular(16)),
                           ),
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
                           child: AudioPlayerBar(
                             isReady: _isReady,
                             isBusy: _isBusy,
