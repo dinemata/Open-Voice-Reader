@@ -29,6 +29,7 @@ dependencies:
   flutter_native_splash: ^2.4.7
   http: ^1.6.0
   in_app_update: ^4.2.5
+  bitsdojo_window: ^0.1.6
 
 flutter_launcher_icons:
   android: "launcher_icon"

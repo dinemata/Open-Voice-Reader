@@ -9,6 +9,7 @@ import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
 import 'package:pdfx/pdfx.dart' as pdfx;
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:flutter/services.dart';
 import 'model.dart';
 import 'speech_test_view.dart';
 import 'main.dart';
@@ -514,6 +515,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       backgroundColor: scaffoldBg,
       appBar: AppBar(
         automaticallyImplyLeading: false,
+        titleSpacing: 8,
         backgroundColor: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
@@ -554,6 +556,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
           const SizedBox(width: 8),
+          // Window controls — only shown on desktop where we have a custom title bar
+          if (!Platform.isAndroid && !Platform.isIOS) _WindowControls(isDark: _isDark),
         ],
       ),
       body: IgnorePointer(
@@ -818,6 +822,84 @@ class _DashboardScreenState extends State<DashboardScreen> {
               isDark: _isDark,
             ),
           ]),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Window control buttons (minimize / maximize / close) ────────────────────
+class _WindowControls extends StatefulWidget {
+  final bool isDark;
+  const _WindowControls({required this.isDark});
+  @override
+  State<_WindowControls> createState() => _WindowControlsState();
+}
+
+class _WindowControlsState extends State<_WindowControls> {
+  bool _isMaximized = false;
+
+  void _minimize() {
+    // With window_manager package: windowManager.minimize()
+    // Without it, we can't minimize without FFI — button is present but no-op
+    // until window_manager: ^0.3.9 is added to pubspec.yaml
+    debugPrint('[WIN] minimize');
+  }
+
+  void _toggleMaximize() {
+    setState(() => _isMaximized = !_isMaximized);
+    // With window_manager: _isMaximized ? windowManager.restore() : windowManager.maximize()
+    debugPrint('[WIN] maximize/restore');
+  }
+
+  void _close() {
+    SystemNavigator.pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (Platform.isAndroid || Platform.isIOS) return const SizedBox.shrink();
+    final iconColor = widget.isDark ? Colors.white60 : const Color(0xFF5F6368);
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      _WinButton(onTap: _minimize,
+          child: Icon(Icons.remove_rounded, size: 14, color: iconColor)),
+      _WinButton(onTap: _toggleMaximize,
+          child: Icon(_isMaximized ? Icons.filter_none_rounded : Icons.crop_square_rounded,
+              size: 13, color: iconColor)),
+      _WinButton(onTap: _close, hoverColor: Colors.red.shade600,
+          child: Icon(Icons.close_rounded, size: 14, color: iconColor)),
+      const SizedBox(width: 4),
+    ]);
+  }
+}
+
+class _WinButton extends StatefulWidget {
+  final VoidCallback onTap;
+  final Widget child;
+  final Color? hoverColor;
+  const _WinButton({required this.onTap, required this.child, this.hoverColor});
+  @override
+  State<_WinButton> createState() => _WinButtonState();
+}
+
+class _WinButtonState extends State<_WinButton> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 100),
+          width: 40, height: 40,
+          color: _hovered
+              ? (widget.hoverColor ?? Colors.white.withValues(alpha: 0.10))
+              : Colors.transparent,
+          alignment: Alignment.center,
+          child: widget.child,
         ),
       ),
     );
