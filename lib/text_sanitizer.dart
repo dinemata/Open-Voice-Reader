@@ -120,12 +120,17 @@ class TextSanitizer {
 
         double currentFontSize = line.fontSize;
         Rect currentBounds = line.bounds;
+        // Pass the first word of this line so digit-start heuristic can fire
+        final String firstWord = line.wordCollection.isNotEmpty
+            ? line.wordCollection.first.text.trim()
+            : '';
 
         if (shouldStartNewBlock(
           currentFontSize: currentFontSize,
           previousFontSize: previousFontSize,
           currentBounds: currentBounds,
           previousBounds: previousBounds,
+          currentLineFirstWord: firstWord,
         )) {
           flushStructuralBlock(pageIdx + 1);
         }
@@ -170,10 +175,10 @@ class TextSanitizer {
   static String _convertQuotes(String text) {
     return text
         .replaceAll('„', '"')
-        .replaceAll('“', '"')
-        .replaceAll('‘', '"')
-        .replaceAll('’', '"')
-        .replaceAll('”', '"');
+        .replaceAll('\u201C', '"')
+        .replaceAll('\u2018', '"')
+        .replaceAll('\u2019', '"')
+        .replaceAll('"', '"');
   }
 
   static String _maskTitlesAndAbbreviations(String text) {
@@ -236,14 +241,28 @@ class TextSanitizer {
     required double previousFontSize,
     Rect currentBounds = Rect.zero,
     Rect previousBounds = Rect.zero,
+    String currentLineFirstWord = '',
   }) {
+    // Different font size → always a new block (heading, caption, footnote, etc.)
     if (previousFontSize != 0.0 && (currentFontSize - previousFontSize).abs() > 0.1) {
       return true;
     }
     if (currentBounds != Rect.zero && previousBounds != Rect.zero) {
-      double verticalDistance = currentBounds.top - previousBounds.bottom;
-      if (verticalDistance > previousBounds.height * 1.7) {
-        return true;
+      final double verticalDistance = currentBounds.top - previousBounds.bottom;
+      final double lineHeight = previousBounds.height;
+      if (lineHeight > 0) {
+        // 1.3× catches paragraph gaps only slightly larger than normal line spacing.
+        // The original 1.7× was too conservative and missed many paragraph breaks.
+        if (verticalDistance > lineHeight * 1.3) {
+          return true;
+        }
+        // Paragraphs starting with a digit (numbered sections, "1. Úvod") may
+        // have the same font size and only a modest gap — force a split at 0.9×.
+        if (verticalDistance > lineHeight * 0.9 &&
+            currentLineFirstWord.isNotEmpty &&
+            RegExp(r'^\d').hasMatch(currentLineFirstWord)) {
+          return true;
+        }
       }
     }
     return false;

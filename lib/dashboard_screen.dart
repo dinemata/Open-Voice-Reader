@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'model.dart';
 import 'speech_test_view.dart';
 import 'main.dart';
+import 'update_service.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -55,6 +56,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         s = prefs.getDouble('dashboard_speed') ?? 1.0;
       }
       if (mounted) setState(() => _playbackSpeed = s);
+    });
+    // Check for updates after the first frame so the UI renders first
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) checkForUpdates(context);
+      });
     });
   }
 
@@ -445,6 +452,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
     setState(() {});
   }
 
+  Widget _buildAppBarTitle() {
+    return Row(children: [
+      Container(
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: const Color(0xFF164063),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Image.asset('assets/icon/fg.png', width: 32, height: 32, fit: BoxFit.contain),
+      ),
+      const SizedBox(width: 10),
+      Text('Open Voice Reader', style: TextStyle(
+        fontWeight: FontWeight.w700, fontSize: 18, letterSpacing: -0.5,
+        color: _isDark ? Colors.white : const Color(0xFF164063),
+      )),
+    ]);
+  }
+
   // ─── File type icon helper ──────────────────────────────────────────────────
   IconData _fileIcon(String path) {
     final ext = path.toLowerCase();
@@ -493,23 +518,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         shape: Border(bottom: BorderSide(color: dividerColor, width: 1)),
-        title: Row(children: [
-          // Logo — always same 4px padding (prevents layout shift on mode change)
-          Container(
-            padding: const EdgeInsets.all(4),
-            decoration: BoxDecoration(
-              color: _isDark ? Colors.white.withValues(alpha: 0.90) : Colors.transparent,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Image.asset('assets/icon/fg.png', width: 32, height: 32, fit: BoxFit.contain),
-          ),
-          const SizedBox(width: 10),  // 8px + slight breathing room
-          Text('Open Voice Reader', style: TextStyle(
-            fontWeight: FontWeight.w700, fontSize: 18, letterSpacing: -0.5,
-            color: _isDark ? Colors.white : const Color(0xFF164063),
-          )),
-        ]),
+        title: _buildAppBarTitle(),
         actions: [
+          // Sponsor button
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: SponsorButton(),
+          ),
+          const SizedBox(width: 4),
           PopupMenuButton<int>(
             tooltip: 'Vzhled',
             icon: Icon(

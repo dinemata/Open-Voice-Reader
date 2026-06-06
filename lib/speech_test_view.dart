@@ -434,6 +434,7 @@ class _SearchBar extends StatefulWidget {
   final String initialQuery;
   final int matchCount;
   final int activeIndex;
+  final bool isDark;
   final void Function(String query) onQueryChanged;
   final VoidCallback onPrev;
   final VoidCallback onNext;
@@ -443,6 +444,7 @@ class _SearchBar extends StatefulWidget {
     required this.initialQuery,
     required this.matchCount,
     required this.activeIndex,
+    this.isDark = false,
     required this.onQueryChanged,
     required this.onPrev,
     required this.onNext,
@@ -501,8 +503,10 @@ class _SearchBarState extends State<_SearchBar> {
   @override
   Widget build(BuildContext context) {
     final bool hasMatches = widget.matchCount > 0;
+    final bg = widget.isDark ? const Color(0xFF2C2C2C) : Colors.white;
     return Material(
       elevation: 4,
+      color: bg,
       borderRadius: BorderRadius.circular(10),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         SizedBox(
@@ -511,9 +515,11 @@ class _SearchBarState extends State<_SearchBar> {
             controller: _ctrl,
             focusNode: _focus,
             // Never auto-unfocus — the keyboard/touch target is this field
+            style: TextStyle(color: widget.isDark ? Colors.white : Colors.black87),
             onTapOutside: (_) {}, // swallow outside taps so we keep focus
             decoration: InputDecoration(
               hintText: 'Hledat…',
+              hintStyle: TextStyle(color: widget.isDark ? Colors.white38 : const Color(0xFF9AA0A6)),
               prefixIcon: const Icon(Icons.search_rounded, size: 16, color: Color(0xFF00897B)),
               suffixIcon: _ctrl.text.isNotEmpty
                   ? IconButton(
@@ -527,14 +533,14 @@ class _SearchBarState extends State<_SearchBar> {
               isDense: true,
               contentPadding: const EdgeInsets.symmetric(vertical: 9),
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-              filled: true, fillColor: Colors.white,
+              filled: true, fillColor: widget.isDark ? const Color(0xFF2C2C2C) : Colors.white,
             ),
             onChanged: _onChanged,
           ),
         ),
         if (hasMatches) ...[
           Text('${widget.activeIndex + 1}/${widget.matchCount}',
-              style: const TextStyle(fontSize: 10, color: Color(0xFF5F6368))),
+              style: TextStyle(fontSize: 10, color: widget.isDark ? Colors.white60 : const Color(0xFF5F6368))),
           IconButton(
             icon: const Icon(Icons.keyboard_arrow_up_rounded, size: 18),
             onPressed: () { widget.onPrev(); _focus.requestFocus(); },
@@ -806,7 +812,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   sf.PdfDocument? _loadedDocument;
   bool _isReady = false;
   bool _isParsingPdf = false;
-  bool _isBufferingNext = false;
+  final Set<int> _bufferingIndices = {}; // replaces single _isBufferingNext bool
   bool _needsModelSelection = true;
   bool _stopAtEndOfBlock = false;
   ModelConfig _selectedModel = availableModels.first;
@@ -820,8 +826,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     readParentheses: true, readLinks: true, readPageNumbers: true,
   );
   bool _skipParentheses = false;
-  bool _skipLinks = false;
-  bool _skipPageNumbers = false;
+  bool _skipLinks = true;        // on by default — links are rarely useful in TTS
+  bool _skipPageNumbers = true;  // on by default — page numbers interrupt reading flow
   bool _skipSuperscripts = false;
   bool _pdfInvert = false; // invert PDF colours for dark reading
 
@@ -917,9 +923,21 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     SharedPreferences.getInstance().then((prefs) {
       final savedSpeed = prefs.getDouble('speed_${widget.book.id}');
       final savedAutoSpeed = prefs.getBool('auto_speed_${widget.book.id}') ?? false;
+      // Load skip preferences (default true for links/pages if never set)
+      final savedSkipLinks = prefs.getBool('skip_links') ?? true;
+      final savedSkipPages = prefs.getBool('skip_pages') ?? true;
+      final savedSkipParens = prefs.getBool('skip_parens') ?? false;
+      final savedSkipSuper = prefs.getBool('skip_superscripts') ?? false;
+      final savedWordIndex = prefs.getInt('word_${widget.book.id}') ?? 0;
       if (mounted) setState(() {
         if (savedSpeed != null) _playbackSpeed = savedSpeed;
         _autoSpeedIncrease = savedAutoSpeed;
+        _skipLinks = savedSkipLinks;
+        _skipPageNumbers = savedSkipPages;
+        _skipParentheses = savedSkipParens;
+        _skipSuperscripts = savedSkipSuper;
+        // Restore word index so highlight resumes from where reading stopped
+        if (savedWordIndex > 0) _currentWordIndex = savedWordIndex;
       });
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -963,28 +981,30 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
     if (Platform.isAndroid || Platform.isIOS) {
       _playbackStateSubscription = audioHandler.playbackState.listen((state) {
-        if (!mounted) return;
         if (state.processingState == AudioProcessingState.completed && _isBusy) {
-          if (_stopAtEndOfBlock) {
-            _stopAudioAndPop();
-          } else {
-            _handleTrackComplete();
-          }
+          // Always dispatch to the platform/UI thread to avoid just_audio threading errors
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!_isBusy) return;
+            if (_stopAtEndOfBlock) { _stopAudioAndPop(); } else { _handleTrackComplete(); }
+          });
         }
       });
-      _positionSubscription = audioHandler.player.positionStream.listen((p) => _updateWordHighlight(p));
+      _positionSubscription = audioHandler.player
+          .createPositionStream(minPeriod: const Duration(milliseconds: 60), maxPeriod: const Duration(milliseconds: 80))
+          .listen((p) => _updateWordHighlight(p));
     } else {
       _playbackStateSubscription = windowsPlayer.processingStateStream.listen((state) {
-        if (!mounted) return;
         if (state == ProcessingState.completed && _isBusy) {
-          if (_stopAtEndOfBlock) {
-            _stopAudioAndPop();
-          } else {
-            _handleTrackComplete();
-          }
+          // Always dispatch to the platform/UI thread to avoid just_audio threading errors
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!_isBusy) return;
+            if (_stopAtEndOfBlock) { _stopAudioAndPop(); } else { _handleTrackComplete(); }
+          });
         }
       });
-      _positionSubscription = windowsPlayer.positionStream.listen((p) => _updateWordHighlight(p));
+      _positionSubscription = windowsPlayer
+          .createPositionStream(minPeriod: const Duration(milliseconds: 60), maxPeriod: const Duration(milliseconds: 80))
+          .listen((p) => _updateWordHighlight(p));
     }
   }
 
@@ -1249,6 +1269,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
             });
             _computeHeadingLevels();
             _mergeAbbreviationChunks();
+            _mergeLargeGapChunks();
             if (_renderedPages.isEmpty) _renderAllPages(MediaQuery.of(context).size.width - 96.0);
             _recenterToCurrentChunk();
           },
@@ -1368,6 +1389,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     widget.book.lastChunkIndex = _currentChunkIndex;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('speed_${widget.book.id}', _playbackSpeed);
+    // Also persist word index so we can resume mid-chunk
+    await prefs.setInt('word_${widget.book.id}', _currentWordIndex);
     final String? booksJson = prefs.getString('saved_books');
     if (booksJson != null) {
       final List<dynamic> decoded = jsonDecode(booksJson);
@@ -1607,8 +1630,15 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _scrollToCurrentChunk(_currentChunkIndex, force: true);
   }
 
-  void _startPdfReading() {
+  void _startPdfReading() async {
     if (_chunksMetadata.isEmpty || globalTts == null) return;
+    if (!await File(widget.book.filePath).exists()) {
+      globalIsAudioBusy = false;
+      globalActiveBookId = null;
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Document was deleted, moved or renamed.')));
+      return;
+    }
     setState(() { _isBusy = true; });
     _executeChunkReading();
   }
@@ -1647,17 +1677,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _executeChunkReading() async {
-    if (!await File(widget.book.filePath).exists()) {
-      _stopPdfReading();
-      globalIsAudioBusy = false;
-      globalActiveBookId = null;
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Document was deleted, moved or renamed. Reading stopped.')),
-        );
-      }
-      return;
-    }
+    // File existence is verified once in _startPdfReading — not on every chunk.
 
     // Loop over chunks that should be skipped, avoiding deep recursion
     while (_currentChunkIndex < _chunksMetadata.length && _isBusy) {
@@ -1724,6 +1744,26 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         // Pre-process abbreviations: DictionaryJirka patterns use \.\s but chunks may end
         // with the dot or have a comma immediately after. Normalise to "abbrev. " form first.
         String ttsText = rawText;
+        // ── Czech ordinal numbers that split blocks (e.g. "90.") ──────────────
+        // Expand common ordinals before sentence-splitting logic touches them
+        const Map<String, String> ordinals = {
+          '100.': 'stý', '90.': 'devadesátý', '80.': 'osmdesátý',
+          '70.': 'sedmdesátý', '60.': 'šedesátý', '50.': 'padesátý',
+          '40.': 'čtyřicátý', '30.': 'třicátý', '20.': 'dvacátý',
+          '19.': 'devatenáctý', '18.': 'osmnáctý', '17.': 'sedmnáctý',
+          '16.': 'šestnáctý', '15.': 'patnáctý', '14.': 'čtrnáctý',
+          '13.': 'třináctý', '12.': 'dvanáctý', '11.': 'jedenáctý',
+          '10.': 'desátý', '9.': 'devátý', '8.': 'osmý', '7.': 'sedmý',
+          '6.': 'šestý', '5.': 'pátý', '4.': 'čtvrtý', '3.': 'třetí',
+          '2.': 'druhý', '1.': 'první',
+        };
+        // Only expand when the ordinal is a standalone word (surrounded by spaces or start/end)
+        for (final entry in ordinals.entries) {
+          ttsText = ttsText.replaceAllMapped(
+            RegExp('(?<=[\\s(]|^)${RegExp.escape(entry.key)}(?=[\\s)]|\$)'),
+                (_) => entry.value,
+          );
+        }
         // Colon mid-sentence → natural pause/drop
         ttsText = ttsText.replaceAll(RegExp(r':\s+'), '. ');
         ttsText = ttsText.replaceAll(RegExp(r':$'), '.');
@@ -1752,25 +1792,30 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       // so N+1 (and N+2) are ready before this chunk finishes playing.
       _bufferNextChunkAsync(_currentChunkIndex + 1);
       _bufferNextChunkAsync(_currentChunkIndex + 2);
+      _bufferNextChunkAsync(_currentChunkIndex + 3);
 
       if (_isBusy) {
         if (Platform.isAndroid || Platform.isIOS) {
           await audioHandler.playFile(wavPath, rawText);
           await audioHandler.player.setSpeed(_playbackSpeed);
           await audioHandler.player.setVolume(_volume);
-          // Re-apply speed after a short delay in case playFile resets it
+          // If we have a saved word offset within this chunk, seek to it
+          _seekToSavedWordIfNeeded();
           Future.delayed(const Duration(milliseconds: 80), () async {
             if (mounted && _isBusy) await audioHandler.player.setSpeed(_playbackSpeed);
           });
         } else {
+          if (!_isBusy) return;
+          await windowsPlayer.setFilePath(wavPath);
+          // load() waits for the audio to be fully buffered before play()
+          // This prevents the 'click play twice' issue caused by premature play calls
+          await windowsPlayer.load();
+          if (!_isBusy) return;
           await windowsPlayer.setVolume(_volume);
           await windowsPlayer.setSpeed(_playbackSpeed);
-          await windowsPlayer.setFilePath(wavPath);
-          if (!_isBusy) return;
-          await Future.delayed(const Duration(milliseconds: 150));
-          if (!_isBusy) return;
           await windowsPlayer.play();
-          await windowsPlayer.setSpeed(_playbackSpeed);
+          // Seek to saved word position within this chunk
+          _seekToSavedWordIfNeeded();
         }
       }
     } catch (e) {
@@ -1783,20 +1828,61 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   Future<void> _bufferNextChunkAsync(int nextIndex) async {
-    if (nextIndex >= _chunksMetadata.length || _pregeneratedAudioCache.containsKey(nextIndex) || _isBufferingNext) return;
-    _isBufferingNext = true;
+    // Concurrent buffering: each index has its own lock slot so N+1/N+2/N+3 run in parallel
+    if (nextIndex >= _chunksMetadata.length) return;
+    if (_pregeneratedAudioCache.containsKey(nextIndex)) return;
+    if (_bufferingIndices.contains(nextIndex)) return;
+    _bufferingIndices.add(nextIndex);
     try {
       final rawText = _chunksMetadata[nextIndex].text;
       if (rawText.trim().isEmpty || globalTts == null) return;
-
       final audio = globalTts!.generate(text: rawText, sid: _selectedModel.sid);
       final tempDir = await getTemporaryDirectory();
-      final wavPath = p.join(tempDir.path, 'chunk_${nextIndex}_${DateTime.now().millisecondsSinceEpoch}.wav');
+      final wavPath = p.join(tempDir.path, 'chunk_${nextIndex}_buf.wav');
       if (sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate)) {
         _pregeneratedAudioCache[nextIndex] = wavPath;
       }
     } catch (_) {}
-    _isBufferingNext = false;
+    _bufferingIndices.remove(nextIndex);
+  }
+
+  /// If we're resuming a chunk that was previously interrupted mid-word,
+  /// seek the player to the approximate timestamp of that word.
+  void _seekToSavedWordIfNeeded() {
+    if (_currentWordIndex <= 0) return; // word 0 = start, no seek needed
+    final chunk = _currentChunkIndex < _chunksMetadata.length
+        ? _chunksMetadata[_currentChunkIndex]
+        : null;
+    if (chunk == null) return;
+
+    final words = chunk.text.split(' ');
+    if (_currentWordIndex >= words.length) return;
+
+    // Estimate position based on character weight of words before target
+    final int totalChars = words.fold(0, (s, w) => s + w.length.clamp(1, 999));
+    int charsBefore = 0;
+    for (int i = 0; i < _currentWordIndex && i < words.length; i++) {
+      charsBefore += words[i].length.clamp(1, 999);
+    }
+    final double frac = totalChars > 0 ? charsBefore / totalChars : 0.0;
+    if (frac <= 0.01) return; // don't bother seeking for the first word
+
+    // Seek after a brief delay to let the player initialise
+    Future.delayed(const Duration(milliseconds: 120), () async {
+      if (!_isBusy || !mounted) return;
+      final player = (Platform.isAndroid || Platform.isIOS)
+          ? audioHandler.player
+          : windowsPlayer;
+      final duration = player.duration;
+      if (duration == null || duration.inMilliseconds == 0) return;
+      final targetMs = (duration.inMilliseconds * frac).round();
+      // Only seek if it's a meaningful offset (>5% into the chunk)
+      if (frac > 0.05) {
+        await player.seek(Duration(milliseconds: targetMs));
+      }
+      // Reset word index after seeking so it resyncs from position stream
+      // (don't reset to 0 — keep it so highlight starts at the right word)
+    });
   }
 
   void _seekRelative(int seconds) async {
@@ -2289,7 +2375,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         ),
         IconButton(
           icon: Icon(_searchOpen ? Icons.search_off_rounded : Icons.search_rounded,
-              color: _searchOpen ? const Color(0xFF1A73E8) : null),
+              color: _searchOpen ? const Color(0xFF00C853) : null), // bright green when active
           tooltip: 'Hledat (Ctrl+F)',
           onPressed: () => setState(() {
             _searchOpen = !_searchOpen;
@@ -2401,7 +2487,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         const Spacer(),
         actionsRow,
       ]);
-      return Container(
+      final phoneBar = Container(
         decoration: BoxDecoration(
           color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
           border: border,
@@ -2412,10 +2498,11 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           SizedBox(height: 42, child: phoneSecondRow),
         ]),
       );
+      return phoneBar;
     }
 
     // Single-row layout
-    return Container(
+    final singleRow = Container(
       decoration: BoxDecoration(
         color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
         border: border,
@@ -2426,6 +2513,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         actionsRow,
       ]),
     );
+    return singleRow;
   }
 
   Widget _buildTocButton(BuildContext context) {
@@ -2665,7 +2753,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                 currentWordIndex: _currentWordIndex,
                 pendingChunkIndex: _pendingJumpIndex,
                 isBusy: _isBusy,
-                primaryColor: Theme.of(context).colorScheme.primary,
+                primaryColor: const Color(0xFF1A73E8), // keep highlight colour consistent across themes
                 skipParentheses: _skipParentheses,
                 searchQuery: _searchQuery,
                 searchMatchChunks: _searchMatches.toSet(),
@@ -2682,6 +2770,35 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         const SizedBox(height: 16),
       ],
     );
+  }
+
+  /// Merges chunks that look like they were split mid-sentence due to a slightly
+  /// larger line gap in the PDF (e.g. after a bold word, super/subscript, or
+  /// column layout). Heuristic: if a chunk ends without sentence-terminal
+  /// punctuation ('.', '!', '?', ':') AND the next chunk starts with a
+  /// lowercase letter (or digit continuing a list), merge them.
+  void _mergeLargeGapChunks() {
+    for (int i = _chunksMetadata.length - 2; i >= 0; i--) {
+      final String a = _chunksMetadata[i].text.trim();
+      final String b = _chunksMetadata[i + 1].text.trim();
+      if (a.isEmpty || b.isEmpty) continue;
+      final String lastChar = a[a.length - 1];
+      final String firstChar = b[0];
+      // Merge if: chunk A doesn't end a sentence AND chunk B continues mid-sentence
+      final bool aEndsInclusive = '.!?:;–—'.contains(lastChar);
+      final bool bStartsLower = firstChar == firstChar.toLowerCase() &&
+          firstChar != firstChar.toUpperCase(); // actual lowercase letter
+      if (!aEndsInclusive && bStartsLower) {
+        final merged = PdfChunkMetadata(
+          text: '$a $b',
+          pageNumber: _chunksMetadata[i].pageNumber,
+          pdfWords: [..._chunksMetadata[i].pdfWords, ..._chunksMetadata[i + 1].pdfWords],
+        );
+        _chunksMetadata[i] = merged;
+        _chunksMetadata.removeAt(i + 1);
+        if (i + 1 < _chunkHeadingLevels.length) _chunkHeadingLevels.removeAt(i + 1);
+      }
+    }
   }
 
   void _toggleSpeedOverlay(BuildContext context) {
@@ -2960,7 +3077,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   ),
                   ListTile(dense: true,
                     leading: Icon(_searchOpen ? Icons.search_off_rounded : Icons.search_rounded,
-                        color: _searchOpen ? const Color(0xFF1A73E8) : null, size: 20),
+                        color: _searchOpen ? const Color(0xFF00C853) : null, size: 20),
                     title: const Text('Hledat', style: TextStyle(fontSize: 13)),
                     onTap: () {
                       setState(() {
@@ -3163,6 +3280,13 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                   else if (v == 'pages') _skipPageNumbers = !_skipPageNumbers;
                   else if (v == 'superscripts') _skipSuperscripts = !_skipSuperscripts;
                   _pregeneratedAudioCache.clear();
+                });
+                // Persist skip preferences
+                SharedPreferences.getInstance().then((p) {
+                  p.setBool('skip_links', _skipLinks);
+                  p.setBool('skip_pages', _skipPageNumbers);
+                  p.setBool('skip_parens', _skipParentheses);
+                  p.setBool('skip_superscripts', _skipSuperscripts);
                 });
                 setLocal(() {});
               }
@@ -3497,6 +3621,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                 width: 220,
                                 child: _SearchBar(
                                   key: const ValueKey('search_bar'),
+                                  isDark: _isDark,
                                   initialQuery: _searchQuery,
                                   matchCount: _searchMatches.length,
                                   activeIndex: _searchMatchIndex,

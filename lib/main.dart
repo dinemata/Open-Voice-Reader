@@ -18,8 +18,12 @@ String? globalCurrentModelId;
 /// Global theme mode notifier — 0 = system, 1 = light, 2 = dark.
 final ValueNotifier<int> appThemeNotifier = ValueNotifier<int>(0);
 
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+
+
   try {
     sherpa.initBindings();
   } catch (e) {
@@ -30,7 +34,6 @@ Future<void> main() async {
   appThemeNotifier.value = prefs.getInt('theme_mode') ?? 0;
 
   final bool isMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
-
   if (isMobile) {
     audioHandler = await AudioService.init(
       builder: () => MyAudioHandler(),
