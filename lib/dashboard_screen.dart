@@ -10,6 +10,7 @@ import 'package:pdfx/pdfx.dart' as pdfx;
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:flutter/services.dart';
+import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'model.dart';
 import 'speech_test_view.dart';
 import 'main.dart';
@@ -521,6 +522,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
         elevation: 0,
         shape: Border(bottom: BorderSide(color: dividerColor, width: 1)),
         title: _buildAppBarTitle(),
+        // MoveWindow is added as a transparent overlay in flexibleSpace
+        // so it doesn't interfere with AppBar's internal layout algorithm.
+        flexibleSpace: (!Platform.isAndroid && !Platform.isIOS)
+            ? WindowTitleBarBox(child: MoveWindow())
+            : null,
         actions: [
           // Sponsor button
           Padding(
@@ -839,21 +845,36 @@ class _WindowControls extends StatefulWidget {
 class _WindowControlsState extends State<_WindowControls> {
   bool _isMaximized = false;
 
+  @override
+  void initState() {
+    super.initState();
+    // Sync maximized state on init
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      try { _isMaximized = appWindow.isMaximized; } catch (_) {}
+    }
+  }
+
   void _minimize() {
-    // With window_manager package: windowManager.minimize()
-    // Without it, we can't minimize without FFI — button is present but no-op
-    // until window_manager: ^0.3.9 is added to pubspec.yaml
-    debugPrint('[WIN] minimize');
+    if (Platform.isAndroid || Platform.isIOS) return;
+    try { appWindow.minimize(); } catch (e) { debugPrint('[WIN] minimize: $e'); }
   }
 
   void _toggleMaximize() {
-    setState(() => _isMaximized = !_isMaximized);
-    // With window_manager: _isMaximized ? windowManager.restore() : windowManager.maximize()
-    debugPrint('[WIN] maximize/restore');
+    if (Platform.isAndroid || Platform.isIOS) return;
+    try {
+      if (appWindow.isMaximized) {
+        appWindow.restore();
+        setState(() => _isMaximized = false);
+      } else {
+        appWindow.maximize();
+        setState(() => _isMaximized = true);
+      }
+    } catch (e) { debugPrint('[WIN] maximize: $e'); }
   }
 
   void _close() {
-    SystemNavigator.pop();
+    if (Platform.isAndroid || Platform.isIOS) { SystemNavigator.pop(); return; }
+    try { appWindow.close(); } catch (e) { debugPrint('[WIN] close: $e'); SystemNavigator.pop(); }
   }
 
   @override

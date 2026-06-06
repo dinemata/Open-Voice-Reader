@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -18,6 +19,7 @@ import 'package:pdfx/pdfx.dart';
 
 import 'model.dart';
 import 'main.dart';
+import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'text_sanitizer.dart';
 import 'dictionary_jirka.dart';
 
@@ -85,6 +87,29 @@ class PdfRenderService {
   Future<void> dispose() async {
     await _doc?.close();
   }
+}
+
+// ─── TTS isolate helpers ──────────────────────────────────────────────────────
+// compute() requires top-level functions and plain data classes (no Flutter objects).
+
+// ─── TTS background helpers ───────────────────────────────────────────────────
+// sherpa-onnx OfflineTts is NOT isolate-safe — generate() stays on main thread.
+// We yield the event loop before calling it so Flutter can render frames.
+// writeWave() is pure file I/O and runs on a background isolate via compute().
+
+class _WaveParams {
+  final String path;
+  final Float32List samples;
+  final int sampleRate;
+  const _WaveParams({required this.path, required this.samples, required this.sampleRate});
+}
+
+bool _writeWaveIsolate(_WaveParams params) {
+  return sherpa.writeWave(
+    filename: params.path,
+    samples: params.samples,
+    sampleRate: params.sampleRate,
+  );
 }
 
 class HighlightPainter extends CustomPainter {
@@ -789,6 +814,98 @@ class AudioPlayerBar extends StatelessWidget {
   }
 }
 
+// ─── Window control buttons ───────────────────────────────────────────────────
+class _WindowControls extends StatefulWidget {
+  final bool isDark;
+  const _WindowControls({required this.isDark});
+  @override
+  State<_WindowControls> createState() => _WindowControlsState();
+}
+
+class _WindowControlsState extends State<_WindowControls> {
+  bool _isMaximized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      try { _isMaximized = appWindow.isMaximized; } catch (_) {}
+    }
+  }
+
+  void _minimize() {
+    if (Platform.isAndroid || Platform.isIOS) return;
+    try { appWindow.minimize(); } catch (e) { debugPrint('[WIN] minimize: $e'); }
+  }
+
+  void _toggleMaximize() {
+    if (Platform.isAndroid || Platform.isIOS) return;
+    try {
+      if (appWindow.isMaximized) {
+        appWindow.restore();
+        setState(() => _isMaximized = false);
+      } else {
+        appWindow.maximize();
+        setState(() => _isMaximized = true);
+      }
+    } catch (e) { debugPrint('[WIN] maximize: $e'); }
+  }
+
+  void _close() {
+    if (Platform.isAndroid || Platform.isIOS) { SystemNavigator.pop(); return; }
+    try { appWindow.close(); } catch (e) { debugPrint('[WIN] close: $e'); SystemNavigator.pop(); }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (Platform.isAndroid || Platform.isIOS) return const SizedBox.shrink();
+    final iconColor = widget.isDark ? Colors.white60 : const Color(0xFF5F6368);
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      _WinBtn(onTap: _minimize,
+          child: Icon(Icons.remove_rounded, size: 14, color: iconColor)),
+      _WinBtn(onTap: _toggleMaximize,
+          child: Icon(_isMaximized ? Icons.filter_none_rounded : Icons.crop_square_rounded,
+              size: 13, color: iconColor)),
+      _WinBtn(onTap: _close, hoverColor: Colors.red.shade600,
+          child: Icon(Icons.close_rounded, size: 14, color: iconColor)),
+      const SizedBox(width: 2),
+    ]);
+  }
+}
+
+class _WinBtn extends StatefulWidget {
+  final VoidCallback onTap;
+  final Widget child;
+  final Color? hoverColor;
+  const _WinBtn({required this.onTap, required this.child, this.hoverColor});
+  @override
+  State<_WinBtn> createState() => _WinBtnState();
+}
+
+class _WinBtnState extends State<_WinBtn> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 100),
+          width: 40, height: 40,
+          color: _hovered
+              ? (widget.hoverColor ?? Colors.white.withValues(alpha: 0.10))
+              : Colors.transparent,
+          alignment: Alignment.center,
+          child: widget.child,
+        ),
+      ),
+    );
+  }
+}
+
 class SpeechTestView extends StatefulWidget {
   final BookModel book;
   const SpeechTestView({super.key, required this.book});
@@ -936,15 +1053,26 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _skipPageNumbers = savedSkipPages;
         _skipParentheses = savedSkipParens;
         _skipSuperscripts = savedSkipSuper;
-        // Restore word index so highlight resumes from where reading stopped
-        if (savedWordIndex > 0) _currentWordIndex = savedWordIndex;
+        // Restore word index for highlight — clear it after first use
+        // so subsequent chunks always start from word 0
+        if (savedWordIndex > 0) {
+          _currentWordIndex = savedWordIndex;
+          // Immediately clear from prefs so it doesn't affect future sessions
+          prefs.setInt('word_${widget.book.id}', 0);
+        }
       });
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _pdfVertScrollController.addListener(_onPdfScroll);
       _pdfHorizScrollController.addListener(_onPdfScroll);
       // Recentre whenever the screen is first built (handles returning from background)
-      if (_isReady && mounted) _recenterToCurrentChunk();
+      if (_isReady && mounted) {
+        _recenterToCurrentChunk();
+        // Extra delayed recentre gives the scroll view time to finish building
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted && _isReady) _recenterToCurrentChunk();
+        });
+      }
       // Compute screen-adaptive baseline zoom: ~0.8 on a 400 px wide screen,
       // scaling proportionally so smaller screens get a larger baseline fraction.
       // Formula: baseline = (referenceWidth / screenWidth) * referenceBaseline
@@ -1671,6 +1799,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       _currentWordIndex = 0;
       _selectedChunkIndex = null;
       _pendingJumpIndex = null;
+      // Clear saved word index so we start from beginning of the jumped-to chunk
     });
     _saveCurrentProgress();
     _executeChunkReading();
@@ -1782,10 +1911,16 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           RegExp(r'\b' + abbrevStemsRaw + r'\.$', caseSensitive: false),
               (m) => m.group(1)!,
         );
+        // Yield to the event loop so Flutter can draw a frame before the
+        // blocking generate() call.
+        await Future.delayed(Duration.zero);
+        if (!_isBusy) return;
         final audio = globalTts!.generate(text: ttsText, sid: _selectedModel.sid);
         final tempDir = await getTemporaryDirectory();
         wavPath = p.join(tempDir.path, 'chunk_${_currentChunkIndex}_${DateTime.now().millisecondsSinceEpoch}.wav');
-        sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate);
+        await compute(_writeWaveIsolate, _WaveParams(
+          path: wavPath, samples: audio.samples, sampleRate: audio.sampleRate,
+        ));
       }
 
       // Start pre-buffering immediately after this chunk is generated,
@@ -1799,8 +1934,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           await audioHandler.playFile(wavPath, rawText);
           await audioHandler.player.setSpeed(_playbackSpeed);
           await audioHandler.player.setVolume(_volume);
-          // If we have a saved word offset within this chunk, seek to it
-          _seekToSavedWordIfNeeded();
           Future.delayed(const Duration(milliseconds: 80), () async {
             if (mounted && _isBusy) await audioHandler.player.setSpeed(_playbackSpeed);
           });
@@ -1814,8 +1947,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           await windowsPlayer.setVolume(_volume);
           await windowsPlayer.setSpeed(_playbackSpeed);
           await windowsPlayer.play();
-          // Seek to saved word position within this chunk
-          _seekToSavedWordIfNeeded();
+
         }
       }
     } catch (e) {
@@ -1828,7 +1960,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   Future<void> _bufferNextChunkAsync(int nextIndex) async {
-    // Concurrent buffering: each index has its own lock slot so N+1/N+2/N+3 run in parallel
     if (nextIndex >= _chunksMetadata.length) return;
     if (_pregeneratedAudioCache.containsKey(nextIndex)) return;
     if (_bufferingIndices.contains(nextIndex)) return;
@@ -1836,12 +1967,14 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     try {
       final rawText = _chunksMetadata[nextIndex].text;
       if (rawText.trim().isEmpty || globalTts == null) return;
+      await Future.delayed(Duration.zero);
       final audio = globalTts!.generate(text: rawText, sid: _selectedModel.sid);
       final tempDir = await getTemporaryDirectory();
       final wavPath = p.join(tempDir.path, 'chunk_${nextIndex}_buf.wav');
-      if (sherpa.writeWave(filename: wavPath, samples: audio.samples, sampleRate: audio.sampleRate)) {
-        _pregeneratedAudioCache[nextIndex] = wavPath;
-      }
+      final ok = await compute(_writeWaveIsolate, _WaveParams(
+        path: wavPath, samples: audio.samples, sampleRate: audio.sampleRate,
+      ));
+      if (ok) _pregeneratedAudioCache[nextIndex] = wavPath;
     } catch (_) {}
     _bufferingIndices.remove(nextIndex);
   }
@@ -2405,6 +2538,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       ...actionItems,
       themeBtn,
       const SizedBox(width: 4),
+      if (!Platform.isAndroid && !Platform.isIOS)
+        _WindowControls(isDark: _isDark),
     ]);
 
     final border = Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1));
@@ -2513,6 +2648,16 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         actionsRow,
       ]),
     );
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      // Wrap in a Stack: the AppBar container sits on top (handles all taps),
+      // and a transparent WindowTitleBarBox behind it handles window drag.
+      // This avoids the "RenderBox with no size" crash from wrapping a
+      // Container directly in MoveWindow.
+      return Stack(children: [
+        WindowTitleBarBox(child: MoveWindow()),
+        singleRow,
+      ]);
+    }
     return singleRow;
   }
 

@@ -6,6 +6,7 @@ import 'package:audio_service/audio_service.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'audio_handler.dart';
 import 'dashboard_screen.dart';
 
@@ -48,6 +49,15 @@ Future<void> main() async {
     windowsPlayer = AudioPlayer();
   }
   runApp(const MyApp());
+  if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+    doWhenWindowReady(() {
+      appWindow.minSize = const Size(640, 480);
+      appWindow.size = const Size(1280, 720);
+      appWindow.alignment = Alignment.center;
+      appWindow.title = 'Open Voice Reader';
+      appWindow.show();
+    });
+  }
 }
 
 class MyApp extends StatelessWidget {
