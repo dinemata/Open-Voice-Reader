@@ -1464,9 +1464,17 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   Future<void> _initEngine() async {
+    // Always clear any stale engine state before (re)initialising.
+    // If the previous session crashed mid-init, globalTts may hold a dangling
+    // native pointer. Clearing here ensures we always start from a clean slate.
     if (globalCurrentModelId == _selectedModel.id && globalTts != null) {
+      // Engine already loaded for this model — skip re-init.
       return;
     }
+    // Tear down any leftover engine from a different model or crashed session.
+    try { globalTts?.free(); } catch (_) {}
+    globalTts = null;
+    globalCurrentModelId = null;
 
     setState(() { _loadingStatusText = "Připravuji hlasový engine..."; });
 
@@ -1513,22 +1521,87 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       sherpa.OfflineTtsModelConfig modelConfig;
 
       final modelPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.modelFile}', targetPath: '${_selectedModel.id}_model.onnx');
-      final tokensPath = await _prepareFile('${_selectedModel.assetDir}/tokens.txt', targetPath: '${_selectedModel.id}_tokens.txt');
+      // Always force-overwrite tokens.txt — a stale/wrong tokens file from a
+      // previous install causes a native crash ("Duplicated token") on Android.
+      final tokensPath = await _prepareFile('${_selectedModel.assetDir}/tokens.txt', targetPath: '${_selectedModel.id}_tokens.txt', forceOverwrite: true);
 
       if (modelPath.isEmpty || tokensPath.isEmpty) throw Exception("Error loading assets.");
 
+      debugPrint('[TTS] Starting dedup for $tokensPath');
+      // ── Deduplicate tokens.txt ────────────────────────────────────────────
+      // Both jirka and alan tokens.txt ship with a duplicate token ID 3.
+      // On Windows sherpa-onnx only warns; on Android it calls LOG(FATAL).
+      // We read the file, remove the second occurrence of any duplicate ID,
+      // and write it back before the native engine opens it.
+      try {
+        final tokensFile = File(tokensPath);
+        final rawBytes = await tokensFile.readAsBytes();
+        // Normalise line endings: \r\n → \n, then split
+        final rawContent = String.fromCharCodes(rawBytes)
+            .replaceAll('\r\n', '\n')
+            .replaceAll('\r', '\n');
+        final lines = rawContent.split('\n');
+        debugPrint('[TTS] tokens lines: ${lines.length}');
+
+        final seen = <String>{};
+        final deduped = <String>[];
+        int removed = 0;
+        for (int i = 0; i < lines.length; i++) {
+          final line = lines[i];
+          // Each valid line: "<token_char(s)> <integer_id>"
+          // Token can be a space, so split on LAST space only.
+          final lastSpace = line.lastIndexOf(' ');
+          if (lastSpace < 0) {
+            // No space — blank line or malformed, keep it
+            deduped.add(line);
+            continue;
+          }
+          final id = line.substring(lastSpace + 1).trim();
+          if (id.isEmpty || !RegExp(r'^\d+$').hasMatch(id)) {
+            // Not a valid numeric ID line — keep as-is
+            deduped.add(line);
+            continue;
+          }
+          if (seen.add(id)) {
+            deduped.add(line);
+          } else {
+            debugPrint('[TTS] Removing duplicate token ID $id at line $i: "${line.length > 20 ? line.substring(0, 20) : line}"');
+            removed++;
+          }
+        }
+
+        if (removed > 0) {
+          // Write back without trailing newline changes
+          final fixed = deduped.join('\n');
+          await tokensFile.writeAsString(fixed, flush: true);
+          debugPrint('[TTS] Dedup done: $removed duplicate(s) removed, ${deduped.length} lines kept');
+        } else {
+          debugPrint('[TTS] No duplicates found — checking raw IDs...');
+          // If no duplicates found by our logic, dump IDs around the known
+          // problem area (lines near the end where the duplicate usually is)
+          for (int i = lines.length - 10; i < lines.length; i++) {
+            if (i >= 0) debugPrint('[TTS] tail L$i: "${lines[i]}"');
+          }
+        }
+      } catch (e) {
+        debugPrint('[TTS] Dedup failed: $e');
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
       final int numThreads = (Platform.isAndroid || Platform.isIOS) ? 2 : 4;
-      final bool debugMode = !(Platform.isAndroid || Platform.isIOS);
+      // debug:true on Android triggers verbose native logging that can cause
+      // buffer overflows and crashes on some devices. Always keep false.
+      const bool debugMode = false;
 
       if (_selectedModel.id == 'en_kokoro') {
-        final extraPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: _selectedModel.configFile);
+        final extraPath = await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: _selectedModel.configFile, forceOverwrite: true);
         modelConfig = sherpa.OfflineTtsModelConfig(
           kokoro: sherpa.OfflineTtsKokoroModelConfig(model: modelPath, voices: extraPath, tokens: tokensPath, dataDir: espeakDataPath),
           numThreads: numThreads,
           debug: debugMode,
         );
       } else {
-        await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: '${_selectedModel.id}_config.json');
+        await _prepareFile('${_selectedModel.assetDir}/${_selectedModel.configFile}', targetPath: '${_selectedModel.id}_config.json', forceOverwrite: true);
         modelConfig = sherpa.OfflineTtsModelConfig(
           vits: sherpa.OfflineTtsVitsModelConfig(model: modelPath, tokens: tokensPath, dataDir: espeakDataPath, noiseScale: 0.667, noiseScaleW: 0.8, lengthScale: 1.0),
           numThreads: numThreads,
@@ -1538,11 +1611,20 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
       globalTts?.free();
       globalTts = null;
-      await Future.delayed(const Duration(milliseconds: 50));
+      await Future.delayed(const Duration(milliseconds: 100));
       globalTts = sherpa.OfflineTts(sherpa.OfflineTtsConfig(model: modelConfig));
+      if (globalTts == null) throw Exception('OfflineTts returned null');
       globalCurrentModelId = _selectedModel.id;
     } catch (e) {
       debugPrint('TTS setup error: $e');
+      globalTts = null;
+      globalCurrentModelId = null;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Chyba inicializace hlasu: $e'),
+          duration: const Duration(seconds: 4),
+        ));
+      }
     }
   }
 
