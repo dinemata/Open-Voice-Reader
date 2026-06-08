@@ -59,16 +59,22 @@ class TextSanitizer {
     List<List<PdfWordGeometry>> chunks = [];
     List<PdfWordGeometry> currentChunk = [];
     StringBuffer buffer = StringBuffer();
+    int wordCount = 0;
 
     for (var word in words) {
       currentChunk.add(word);
       buffer.write(buffer.isEmpty ? word.text : " ${word.text}");
+      wordCount++;
 
       bool isEnd = hasSentenceEnd(word.text);
-      if ((isEnd && buffer.length > 150) || buffer.length > 600) {
+      // Split at sentence boundary after 20+ words, or hard-split at 35 words.
+      // Keeping chunks short means generate() never blocks for more than ~1s,
+      // which is the maximum acceptable freeze on the main thread.
+      if ((isEnd && wordCount >= 20) || wordCount >= 35) {
         chunks.add(List.from(currentChunk));
         currentChunk.clear();
         buffer.clear();
+        wordCount = 0;
       }
     }
 
@@ -111,7 +117,8 @@ class TextSanitizer {
     }
 
     for (int pageIdx = 0; pageIdx < pageCount; pageIdx++) {
-      final List<sf.TextLine> textLines = extractor.extractTextLines(startPageIndex: pageIdx, endPageIndex: pageIdx);
+      final List<sf.TextLine> textLines = extractor.extractTextLines(
+          startPageIndex: pageIdx, endPageIndex: pageIdx);
       StringBuffer reconstructedWordText = StringBuffer();
       Rect? reconstructedWordBounds;
 
@@ -120,7 +127,6 @@ class TextSanitizer {
 
         double currentFontSize = line.fontSize;
         Rect currentBounds = line.bounds;
-        // Pass the first word of this line so digit-start heuristic can fire
         final String firstWord = line.wordCollection.isNotEmpty
             ? line.wordCollection.first.text.trim()
             : '';
@@ -146,7 +152,8 @@ class TextSanitizer {
             reconstructedWordBounds = reconstructedWordBounds.expandToInclude(word.bounds);
           }
           reconstructedWordText.write(part);
-          if (part.endsWith(' ') || part == '\n' || part == '\r' || word == line.wordCollection.last) {
+          if (part.endsWith(' ') || part == '\n' || part == '\r' ||
+              word == line.wordCollection.last) {
             String cleanWord = reconstructedWordText.toString().trim();
             reconstructedWordText.clear();
             if (cleanWord.isEmpty) continue;
@@ -159,7 +166,8 @@ class TextSanitizer {
             }
 
             if (reconstructedWordBounds != null) {
-              structuralBlockWords.add(PdfWordGeometry(bounds: reconstructedWordBounds, text: cleanWord));
+              structuralBlockWords.add(
+                  PdfWordGeometry(bounds: reconstructedWordBounds, text: cleanWord));
             }
           }
         }
@@ -175,10 +183,10 @@ class TextSanitizer {
   static String _convertQuotes(String text) {
     return text
         .replaceAll('„', '"')
-        .replaceAll('\u201C', '"')
-        .replaceAll('\u2018', '"')
-        .replaceAll('\u2019', '"')
-        .replaceAll('"', '"');
+        .replaceAll('\u201C', '"')  // left double quotation mark "
+        .replaceAll('\u2018', '"')  // left single quotation mark '
+        .replaceAll('\u2019', '"')  // right single quotation mark '
+        .replaceAll('"', '"');      // right double quotation mark "
   }
 
   static String _maskTitlesAndAbbreviations(String text) {
@@ -205,7 +213,8 @@ class TextSanitizer {
 
   static String _cleanAcademicArtifacts(String text, SanitizerOptions options) {
     if (!options.readParentheses) {
-      text = text.replaceAll(RegExp(r'\(\s*[A-Za-zČŠŽÝÁÍÉÚŮčšžýáíéúů\s&]+,\s*\d{4}\s*\)'), '');
+      text = text.replaceAll(
+          RegExp(r'\(\s*[A-Za-zČŠŽÝÁÍÉÚŮčšžýáíéúů\s&]+,\s*\d{4}\s*\)'), '');
       text = text.replaceAll(RegExp(r'\[\s*\d+\s*\]'), '');
       text = text.replaceAll(RegExp(r'\([^)]*\)'), '');
     }
@@ -247,18 +256,29 @@ class TextSanitizer {
     if (previousFontSize != 0.0 && (currentFontSize - previousFontSize).abs() > 0.1) {
       return true;
     }
+
     if (currentBounds != Rect.zero && previousBounds != Rect.zero) {
       final double verticalDistance = currentBounds.top - previousBounds.bottom;
       final double lineHeight = previousBounds.height;
+
       if (lineHeight > 0) {
-        // 1.3× catches paragraph gaps only slightly larger than normal line spacing.
-        // The original 1.7× was too conservative and missed many paragraph breaks.
-        if (verticalDistance > lineHeight * 1.3) {
+        // ── Primary gap threshold ──────────────────────────────────────────
+        // 1.15× catches paragraph breaks that are only slightly wider than
+        // normal line spacing (common in single-spaced PDFs).
+        // Lowered from 1.3× to catch more real paragraph boundaries while
+        // staying above the ~1.0× that normal line spacing produces.
+        if (verticalDistance > lineHeight * 1.15) {
           return true;
         }
-        // Paragraphs starting with a digit (numbered sections, "1. Úvod") may
-        // have the same font size and only a modest gap — force a split at 0.9×.
-        if (verticalDistance > lineHeight * 0.9 &&
+
+        // ── Digit-start heuristic ──────────────────────────────────────────
+        // Numbered sections ("1. Úvod", "2.3 Results") often have exactly
+        // normal line spacing but ARE new paragraphs. Force a split whenever
+        // the new line starts with a digit, even at 0.5× gap, so that "1."
+        // never gets appended to the previous chunk.
+        // We require verticalDistance > 0 to avoid splitting on the same line
+        // being processed twice (can happen with multi-column PDFs).
+        if (verticalDistance > 0 &&
             currentLineFirstWord.isNotEmpty &&
             RegExp(r'^\d').hasMatch(currentLineFirstWord)) {
           return true;
