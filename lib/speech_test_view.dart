@@ -6,7 +6,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
@@ -1053,26 +1052,20 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           .listen((p) => _updateWordHighlight(p));
     } else {
       _playbackStateSubscription = windowsPlayer.processingStateStream.listen((state) {
-        debugPrint("[DBG] processingState=$state isBusy=$_isBusy "
-            "dur=${windowsPlayer.duration?.inMilliseconds}ms "
-            "pos=${windowsPlayer.position.inMilliseconds}ms "
-            "chunk=$_currentChunkIndex");
         if (state == ProcessingState.completed && _isBusy) {
           final dur = windowsPlayer.duration;
           final pos = windowsPlayer.position;
           if (dur == null || dur.inMilliseconds == 0) {
-            debugPrint("[DBG] SKIP completed: dur=null/0");
             return;
           }
           if (pos.inMilliseconds < 100) {
-            debugPrint("[DBG] SKIP completed: pos<100ms (pos=${pos.inMilliseconds}ms)");
             return;
           }
-          debugPrint("[DBG] REAL completed → handleTrackComplete chunk=$_currentChunkIndex");
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!_isBusy) return;
-            if (_stopAtEndOfBlock) { _stopAudioAndPop(); } else { _handleTrackComplete(); }
-          });
+          // Call directly — addPostFrameCallback waits for a Flutter frame which
+          // on Windows requires OS message pump activity (mouse hover etc).
+          // _handleTrackComplete is safe to call from a stream listener.
+          if (!_isBusy) return;
+          if (_stopAtEndOfBlock) { _stopAudioAndPop(); } else { _handleTrackComplete(); }
         }
       });
       _positionSubscription = windowsPlayer
@@ -1408,7 +1401,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   }
 
   void _handleTrackComplete() async {
-    debugPrint("[DBG] _handleTrackComplete called chunk=$_currentChunkIndex isBusy=$_isBusy");
     if (_autoSpeedIncrease && _currentChunkIndex < _chunksMetadata.length) {
       final words = _chunksMetadata[_currentChunkIndex].text.trim().split(RegExp(r'\s+')).length;
       _wordsReadSinceSpeedIncrease += words;
@@ -1717,7 +1709,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
   //   3. Pre-buffer is limited to +1 only. Concurrent generate() calls for
   //      +1/+2/+3 block the main thread and freeze the UI.
   void _executeChunkReading() async {
-    debugPrint("[DBG] _executeChunkReading chunk=$_currentChunkIndex isBusy=$_isBusy total=${_chunksMetadata.length}");
     if (_currentChunkIndex >= _chunksMetadata.length || !_isBusy) {
       if (mounted) setState(() { _isBusy = false; });
       return;
@@ -1840,18 +1831,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               (m) => m.group(1)!,
         );
 
-        // scheduleWarmUpFrame forces the Flutter engine to render a frame
-        // synchronously without needing the OS message pump. This ensures
-        // the chunk highlight updates are visible before generate() blocks.
-        // Unlike scheduleFrame()+Future.delayed, this works on Windows even
-        // with no user input.
-        debugPrint("[DBG] Before scheduleWarmUpFrame chunk=$_currentChunkIndex");
-        SchedulerBinding.instance.scheduleWarmUpFrame();
-        await Future.microtask(() {});
-        debugPrint("[DBG] After warmUpFrame, starting generate() chunk=$_currentChunkIndex text.length=${ttsText.length}");
         if (!_isBusy) return;
         final audio = globalTts!.generate(text: ttsText, sid: _selectedModel.sid);
-        debugPrint("[DBG] generate() DONE chunk=$_currentChunkIndex samples=${audio.samples.length}");
         final tempDir = await getTemporaryDirectory();
         wavPath = p.join(tempDir.path,
             'chunk_${_currentChunkIndex}_${DateTime.now().millisecondsSinceEpoch}.wav');
@@ -1924,7 +1905,6 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     } catch (e) {
       debugPrint('Pre-generate error: $e');
     }
-    debugPrint("[DBG] _pregenerateNextChunk DONE idx=$nextIndex cached=${_pregeneratedAudioCache.containsKey(nextIndex)}");
     _isPreGenerating = false;
   }
 
