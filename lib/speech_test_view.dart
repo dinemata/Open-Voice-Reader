@@ -605,7 +605,7 @@ class AudioPlayerBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final screenW = MediaQuery.of(context).size.width;
-    final isPhone = screenW < 480;
+    final isPhone = screenW < 700;
     final progressBg = isDark ? const Color(0xFF3A3A3A) : Colors.grey.shade200;
 
     return Column(mainAxisSize: MainAxisSize.min, children: [
@@ -1005,12 +1005,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _pdfVertScrollController.addListener(_onPdfScroll);
       _pdfHorizScrollController.addListener(_onPdfScroll);
-      if (_isReady && mounted) {
-        _recenterToCurrentChunk();
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (mounted && _isReady) _recenterToCurrentChunk();
-        });
-      }
+      // _initEngineAndLoadPdf handles initial recentering via _recenterToCurrentChunk().
+      // No recenter needed here — it runs before _isReady is set.
       if (mounted) {
         final screenW = MediaQuery.of(context).size.width;
         final baseline = ((400.0 / screenW) * 0.8).clamp(0.5, 1.0);
@@ -1550,6 +1546,9 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     }
   }
 
+  // Bump this when chunk-splitting logic changes so old caches are ignored.
+  static const int _cacheVersion = 3;
+
   Future<void> _saveCacheToDisk(String bookId, List<PdfChunkMetadata> chunks) async {
     try {
       final appDir = await getApplicationSupportDirectory();
@@ -1558,7 +1557,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
       final cacheFile = File(p.join(cacheFolder.path, '$bookId.cache'));
       final List<Map<String, dynamic>> mapped = chunks.map((c) => c.toMap()).toList();
-      await cacheFile.writeAsString(jsonEncode(mapped), flush: true);
+      final envelope = {'v': _cacheVersion, 'chunks': mapped};
+      await cacheFile.writeAsString(jsonEncode(envelope), flush: true);
     } catch (e) {
       debugPrint('Error saving cache to disk: $e');
     }
@@ -1569,9 +1569,18 @@ class _SpeechTestViewState extends State<SpeechTestView> {
       final appDir = await getApplicationSupportDirectory();
       final cacheFile = File(p.join(appDir.path, 'book_cache', '$bookId.cache'));
       if (await cacheFile.exists()) {
-        final String content = await cacheFile.readAsString();
-        final List<dynamic> decoded = jsonDecode(content);
-        return decoded.map((item) => PdfChunkMetadata.fromMap(item)).toList();
+        final String raw = await cacheFile.readAsString();
+        final dynamic decoded = jsonDecode(raw);
+        // Support both old (plain list) and new (versioned envelope) formats.
+        if (decoded is Map && decoded['v'] == _cacheVersion) {
+          final List<dynamic> list = decoded['chunks'] as List<dynamic>;
+          return list.map((item) => PdfChunkMetadata.fromMap(item)).toList();
+        } else if (decoded is List && _cacheVersion == 1) {
+          // Legacy format — only accept if version is still 1.
+          return decoded.map((item) => PdfChunkMetadata.fromMap(item)).toList();
+        }
+        // Version mismatch — fall through to return null (will re-parse).
+        debugPrint('[CACHE] Version mismatch for $bookId — re-parsing.');
       }
     } catch (e) {
       debugPrint('Error loading cache from disk: $e');
@@ -1651,6 +1660,23 @@ class _SpeechTestViewState extends State<SpeechTestView> {
     _isProgrammaticScrolling = true;
     setState(() { _isUserScrolling = false; });
     _scrollToCurrentChunk(_currentChunkIndex, force: true);
+    // If the text view list controller isn't attached yet (widget just built),
+    // retry until it is — up to ~800ms total.
+    if (!globalIsOriginalLayout && !_itemScrollController.isAttached) {
+      _retryRecenter(0);
+    }
+  }
+
+  void _retryRecenter(int attempt) {
+    if (attempt >= 10 || !mounted) return;
+    Future.delayed(const Duration(milliseconds: 80), () {
+      if (!mounted) return;
+      if (_itemScrollController.isAttached) {
+        _scrollToCurrentChunk(_currentChunkIndex, force: true);
+      } else {
+        _retryRecenter(attempt + 1);
+      }
+    });
   }
 
   void _startPdfReading() async {
@@ -2057,8 +2083,8 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         spans.add(TextSpan(
           text: match.group(0),
           style: TextStyle(
-            color: Colors.purple.shade400,
-            backgroundColor: Colors.purple.shade50,
+            color: Colors.purple.shade300,
+            backgroundColor: Colors.purple.withValues(alpha: _isDark ? 0.18 : 0.08),
             fontStyle: FontStyle.italic,
             decoration: TextDecoration.lineThrough,
             decorationColor: Colors.purple.shade300,
@@ -2274,12 +2300,17 @@ class _SpeechTestViewState extends State<SpeechTestView> {
 
   Widget _buildAppBar(BuildContext context) {
     final screenW = MediaQuery.of(context).size.width;
-    final isPhone = screenW < 480;
+    final isPhone = screenW < 700;
 
-    final titleRow = Row(children: [
+    final titleRow = Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
       const SizedBox(width: 4),
       TextButton.icon(
-        style: TextButton.styleFrom(foregroundColor: _isDark ? Colors.white70 : Colors.black87),
+        style: TextButton.styleFrom(
+          foregroundColor: _isDark ? Colors.white70 : Colors.black87,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          minimumSize: const Size(0, 36),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+        ),
         onPressed: _handlePopAction,
         icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 14),
         label: const Text('Zpět', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -2293,22 +2324,28 @@ class _SpeechTestViewState extends State<SpeechTestView> {
           child: InkWell(
             onTap: _showFileNameDialog,
             borderRadius: BorderRadius.circular(4),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-              child: Text(widget.book.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14,
-                      color: _isDark ? Colors.white : const Color(0xFF1F1F1F))),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                child: Text(widget.book.title, maxLines: 1, overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14,
+                        color: _isDark ? Colors.white : const Color(0xFF1F1F1F))),
+              ),
             ),
           ),
         )
             : InkWell(
           onTap: _showFileNameDialog,
           borderRadius: BorderRadius.circular(4),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-            child: Text(widget.book.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14,
-                    color: _isDark ? Colors.white : const Color(0xFF1F1F1F))),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4.0),
+              child: Text(widget.book.title, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14,
+                      color: _isDark ? Colors.white : const Color(0xFF1F1F1F))),
+            ),
           ),
         ),
       ),
@@ -2446,7 +2483,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         _WindowControls(isDark: _isDark),
     ]);
 
-    final border = Border(bottom: BorderSide(color: Colors.grey.shade200, width: 1));
+    final border = Border(bottom: BorderSide(color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade200, width: 1));
 
     if (isPhone) {
       final phoneTitleRow = Row(children: [
@@ -2502,7 +2539,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                       child: Text(_selectedModel.langCode.toUpperCase(), style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w800, color: Colors.grey))),
                   const SizedBox(width: 4), _buildCpuIndicator(_selectedModel.cpuLoad), const SizedBox(width: 4),
                   Expanded(child: Text(_selectedModel.name, maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: Color(0xFF1F1F1F), fontWeight: FontWeight.w600))),
+                      style: TextStyle(fontSize: 11, color: _isDark ? Colors.white : const Color(0xFF1F1F1F), fontWeight: FontWeight.w600))),
                   const Icon(Icons.keyboard_arrow_down_rounded, color: Color(0xFF1A73E8), size: 16),
                 ]),
               ),
@@ -2532,19 +2569,29 @@ class _SpeechTestViewState extends State<SpeechTestView> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           SizedBox(height: 44, child: phoneTitleRow),
           Container(height: 1, color: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey.shade100),
-          SizedBox(height: 42, child: phoneSecondRow),
+          Container(
+            height: 42,
+            color: _isDark ? const Color(0xFF161616) : const Color(0xFFF5F5F5),
+            child: phoneSecondRow,
+          ),
         ]),
       );
       return phoneBar;
     }
 
     final singleRow = Container(
+      height: 56,
       decoration: BoxDecoration(
         color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
         border: border,
       ),
-      child: Row(children: [
-        Expanded(child: titleRow),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+        Expanded(
+          child: SizedBox(
+            height: 56,
+            child: titleRow,
+          ),
+        ),
         const VerticalDivider(width: 12, indent: 10, endIndent: 10),
         actionsRow,
       ]),
@@ -3045,7 +3092,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                     child: Row(children: [
                       const Icon(Icons.zoom_in_rounded, size: 16, color: Color(0xFF5F6368)),
                       const SizedBox(width: 6),
-                      Text('Zoom', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: mdm ? Colors.white : const Color(0xFF1F1F1F))),
+                      Text('Přiblížení', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: mdm ? Colors.white : const Color(0xFF1F1F1F))),
                       const Spacer(),
                       IconButton(icon: const Icon(Icons.remove_circle_outline_rounded, size: 18),
                           onPressed: (_currentZoomFactor <= _minZoom) ? null : () { _changeZoom(-_zoomStep); setLocal(() {}); },
@@ -3090,7 +3137,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                     const SizedBox(width: 8),
                     const Expanded(child: Text('Vzhled', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
                     Container(
-                      decoration: BoxDecoration(color: const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(8)),
+                      decoration: BoxDecoration(color: mdm ? const Color(0xFF3A3A3A) : const Color(0xFFF1F3F4), borderRadius: BorderRadius.circular(8)),
                       child: Row(mainAxisSize: MainAxisSize.min, children: [
                         for (final entry in [
                           (0, Icons.brightness_auto_rounded),
@@ -3111,7 +3158,7 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                 borderRadius: BorderRadius.circular(7),
                               ),
                               child: Icon(entry.$2, size: 15,
-                                  color: appThemeNotifier.value == entry.$1 ? Colors.white : const Color(0xFF5F6368)),
+                                  color: appThemeNotifier.value == entry.$1 ? Colors.white : (mdm ? Colors.white54 : const Color(0xFF5F6368))),
                             ),
                           ),
                       ]),
@@ -3388,51 +3435,60 @@ class _SpeechTestViewState extends State<SpeechTestView> {
               appBar: (_needsModelSelection || _isFullscreen)
                   ? null
                   : PreferredSize(
-                preferredSize: MediaQuery.of(context).size.width < 480
+                preferredSize: MediaQuery.of(context).size.width < 700
                     ? const Size.fromHeight(96)
                     : const Size.fromHeight(56),
                 child: _buildAppBar(context),
               ),
               body: SafeArea(
                 child: _needsModelSelection
-                    ? Center(
-                  child: Container(
-                    constraints: const BoxConstraints(maxWidth: 400),
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), border: Border.all(color: Colors.grey.shade200)),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.voice_over_off_rounded, size: 48, color: Color(0xFF1A73E8)),
-                        const SizedBox(height: 16),
-                        const Text('Vyberte hlas pro tento dokument', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F1F1F))),
-                        const SizedBox(height: 8),
-                        const Text('Tento dokument nemá přiřazený model. Zvolte výchozí formát čtení:', textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: Colors.grey)),
-                        const SizedBox(height: 24),
-                        ...availableModels.map((model) => Padding(
-                          padding: const EdgeInsets.only(bottom: 10.0),
-                          child: OutlinedButton(
-                            style: OutlinedButton.styleFrom(
-                              minimumSize: const Size.fromHeight(50),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                              side: BorderSide(color: Colors.grey.shade300),
+                    ? Container(
+                  color: _isDark ? const Color(0xFF121212) : const Color(0xFFF8F9FA),
+                  child: Center(
+                    child: Container(
+                      constraints: const BoxConstraints(maxWidth: 400),
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(color: _isDark ? Colors.white.withValues(alpha: 0.1) : Colors.grey.shade200),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.voice_over_off_rounded, size: 48, color: const Color(0xFF1A73E8)),
+                          const SizedBox(height: 16),
+                          Text('Vyberte hlas pro tento dokument', textAlign: TextAlign.center, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _isDark ? Colors.white : const Color(0xFF1F1F1F))),
+                          const SizedBox(height: 8),
+                          Text('Tento dokument nemá přiřazený model. Zvolte výchozí formát čtení:', textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: _isDark ? Colors.white54 : Colors.grey)),
+                          const SizedBox(height: 24),
+                          ...availableModels.map((model) => Padding(
+                            padding: const EdgeInsets.only(bottom: 10.0),
+                            child: OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                minimumSize: const Size.fromHeight(50),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                side: BorderSide(color: _isDark ? Colors.white.withValues(alpha: 0.15) : Colors.grey.shade300),
+                                backgroundColor: _isDark ? const Color(0xFF2C2C2C) : Colors.transparent,
+                                foregroundColor: _isDark ? Colors.white : null,
+                              ),
+                              onPressed: () => _selectInitialModel(model),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(color: _isDark ? const Color(0xFF1A3A6E) : const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(4)),
+                                    child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF1A73E8))),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(child: Text(model.name, style: TextStyle(fontWeight: FontWeight.w600, color: _isDark ? Colors.white : const Color(0xFF1F1F1F)))),
+                                  _buildCpuIndicator(model.cpuLoad),
+                                ],
+                              ),
                             ),
-                            onPressed: () => _selectInitialModel(model),
-                            child: Row(
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(4)),
-                                  child: Text(model.langCode.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF1A73E8))),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(child: Text(model.name, style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF1F1F1F)))),
-                                _buildCpuIndicator(model.cpuLoad),
-                              ],
-                            ),
-                          ),
-                        )),
-                      ],
+                          )),
+                        ],
+                      ),
                     ),
                   ),
                 )
@@ -3495,96 +3551,104 @@ class _SpeechTestViewState extends State<SpeechTestView> {
                                           }
                                           return false;
                                         },
-                                        child: ScrollablePositionedList.builder(
-                                          itemScrollController: _itemScrollController,
-                                          itemPositionsListener: _itemPositionsListener,
-                                          padding: const EdgeInsets.only(top: 52),
-                                          itemCount: _chunksMetadata.length,
-                                          itemBuilder: (context, index) {
-                                            final bool isCurrent = index == _currentChunkIndex;
-                                            final bool isSelected = index == _selectedChunkIndex;
-                                            final bool isPending = index == _pendingJumpIndex;
-                                            final bool isSearchMatch = _searchMatches.isNotEmpty && _searchMatches.contains(index);
-                                            final bool isActiveSearchMatch = _searchMatches.isNotEmpty && _searchMatchIndex < _searchMatches.length && _searchMatches[_searchMatchIndex] == index;
-                                            final int lvl = _headingLevel(index);
-                                            final bool isHeading = lvl > 0;
+                                        child: ScrollbarTheme(
+                                          data: ScrollbarThemeData(
+                                            // Hide the inner scrollbar — the OS/platform
+                                            // provides one and we don't need a second one.
+                                            thumbVisibility: WidgetStateProperty.all(false),
+                                            trackVisibility: WidgetStateProperty.all(false),
+                                          ),
+                                          child: ScrollablePositionedList.builder(
+                                            itemScrollController: _itemScrollController,
+                                            itemPositionsListener: _itemPositionsListener,
+                                            padding: const EdgeInsets.only(top: 52),
+                                            itemCount: _chunksMetadata.length,
+                                            itemBuilder: (context, index) {
+                                              final bool isCurrent = index == _currentChunkIndex;
+                                              final bool isSelected = index == _selectedChunkIndex;
+                                              final bool isPending = index == _pendingJumpIndex;
+                                              final bool isSearchMatch = _searchMatches.isNotEmpty && _searchMatches.contains(index);
+                                              final bool isActiveSearchMatch = _searchMatches.isNotEmpty && _searchMatchIndex < _searchMatches.length && _searchMatches[_searchMatchIndex] == index;
+                                              final int lvl = _headingLevel(index);
+                                              final bool isHeading = lvl > 0;
 
-                                            double fontSize;
-                                            FontWeight fontWeight;
-                                            EdgeInsets extraPad;
-                                            switch (lvl) {
-                                              case 1: fontSize = 22 * _textZoomFactor; fontWeight = FontWeight.w800; extraPad = const EdgeInsets.only(top: 12, bottom: 4);
-                                              case 2: fontSize = 18 * _textZoomFactor; fontWeight = FontWeight.w700; extraPad = const EdgeInsets.only(top: 8, bottom: 2);
-                                              case 3: fontSize = 15 * _textZoomFactor; fontWeight = FontWeight.w600; extraPad = const EdgeInsets.only(top: 4);
-                                              default: fontSize = 16 * _textZoomFactor; fontWeight = FontWeight.normal; extraPad = EdgeInsets.zero;
-                                            }
+                                              double fontSize;
+                                              FontWeight fontWeight;
+                                              EdgeInsets extraPad;
+                                              switch (lvl) {
+                                                case 1: fontSize = 22 * _textZoomFactor; fontWeight = FontWeight.w800; extraPad = const EdgeInsets.only(top: 12, bottom: 4);
+                                                case 2: fontSize = 18 * _textZoomFactor; fontWeight = FontWeight.w700; extraPad = const EdgeInsets.only(top: 8, bottom: 2);
+                                                case 3: fontSize = 15 * _textZoomFactor; fontWeight = FontWeight.w600; extraPad = const EdgeInsets.only(top: 4);
+                                                default: fontSize = 16 * _textZoomFactor; fontWeight = FontWeight.normal; extraPad = EdgeInsets.zero;
+                                              }
 
-                                            Color bgColor = Colors.transparent;
-                                            Border? border;
-                                            if (isPending) {
-                                              bgColor = Colors.orange.withValues(alpha: 0.12);
-                                              border = Border.all(color: Colors.orange.shade400, width: 2);
-                                            } else if (_isBusy && isCurrent) {
-                                              bgColor = Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.3);
-                                              border = Border.all(color: Theme.of(context).colorScheme.primary, width: 1.5);
-                                            } else if (isSelected) {
-                                              bgColor = Colors.orange.withValues(alpha: 0.12);
-                                              border = Border.all(color: Colors.orange.shade400, width: 1.5);
-                                            } else if (isCurrent && !_isBusy) {
-                                              border = Border.all(color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4), width: 1);
-                                            }
+                                              Color bgColor = Colors.transparent;
+                                              Border? border;
+                                              if (isPending) {
+                                                bgColor = Colors.orange.withValues(alpha: 0.12);
+                                                border = Border.all(color: Colors.orange.shade400, width: 2);
+                                              } else if (_isBusy && isCurrent) {
+                                                bgColor = Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.3);
+                                                border = Border.all(color: Theme.of(context).colorScheme.primary, width: 1.5);
+                                              } else if (isSelected) {
+                                                bgColor = Colors.orange.withValues(alpha: 0.12);
+                                                border = Border.all(color: Colors.orange.shade400, width: 1.5);
+                                              } else if (isCurrent && !_isBusy) {
+                                                border = Border.all(color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4), width: 1);
+                                              }
 
-                                            final Widget textWidget = (_isBusy && isCurrent)
-                                                ? RichText(text: TextSpan(
-                                              style: TextStyle(fontSize: fontSize, height: 1.6, color: _isDark ? Colors.white70 : Colors.black87, fontWeight: fontWeight),
-                                              children: _buildHighlightedWords(_chunksMetadata[index].text, context),
-                                            ))
-                                                : (isSearchMatch && _searchQuery.isNotEmpty)
-                                                ? RichText(text: TextSpan(
-                                              style: TextStyle(fontSize: fontSize, height: isHeading ? 1.3 : 1.6, fontWeight: fontWeight,
-                                                  color: index < _currentChunkIndex ? (_isDark ? Colors.white24 : Colors.grey.shade400) : (_isDark ? Colors.white70 : Colors.black87)),
-                                              children: _buildSearchHighlightedWords(_chunksMetadata[index].text, _searchQuery, isActiveSearchMatch),
-                                            ))
-                                                : Text(_chunksMetadata[index].text, style: TextStyle(
-                                              fontSize: fontSize,
-                                              height: isHeading ? 1.3 : 1.6,
-                                              fontWeight: fontWeight,
-                                              color: index < _currentChunkIndex
-                                                  ? (isHeading ? Colors.grey.shade500 : (_isDark ? Colors.white30 : Colors.grey.shade400))
-                                                  : (isHeading ? (_isDark ? Colors.white : Colors.black) : (_isDark ? Colors.white70 : Colors.black87)),
-                                            ));
+                                              final Widget textWidget = (_isBusy && isCurrent)
+                                                  ? RichText(text: TextSpan(
+                                                style: TextStyle(fontSize: fontSize, height: 1.6, color: _isDark ? Colors.white70 : Colors.black87, fontWeight: fontWeight),
+                                                children: _buildHighlightedWords(_chunksMetadata[index].text, context),
+                                              ))
+                                                  : (isSearchMatch && _searchQuery.isNotEmpty)
+                                                  ? RichText(text: TextSpan(
+                                                style: TextStyle(fontSize: fontSize, height: isHeading ? 1.3 : 1.6, fontWeight: fontWeight,
+                                                    color: index < _currentChunkIndex ? (_isDark ? Colors.white24 : Colors.grey.shade400) : (_isDark ? Colors.white70 : Colors.black87)),
+                                                children: _buildSearchHighlightedWords(_chunksMetadata[index].text, _searchQuery, isActiveSearchMatch),
+                                              ))
+                                                  : Text(_chunksMetadata[index].text, style: TextStyle(
+                                                fontSize: fontSize,
+                                                height: isHeading ? 1.3 : 1.6,
+                                                fontWeight: fontWeight,
+                                                color: index < _currentChunkIndex
+                                                    ? (isHeading ? Colors.grey.shade500 : (_isDark ? Colors.white30 : Colors.grey.shade400))
+                                                    : (isHeading ? (_isDark ? Colors.white : Colors.black) : (_isDark ? Colors.white70 : Colors.black87)),
+                                              ));
 
-                                            return Padding(
-                                              padding: extraPad,
-                                              child: Container(
-                                                margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
-                                                child: InkWell(
-                                                  onTap: () => setState(() { _selectedChunkIndex = index; }),
-                                                  borderRadius: BorderRadius.circular(8),
-                                                  child: AnimatedContainer(
-                                                    duration: const Duration(milliseconds: 150),
-                                                    padding: EdgeInsets.fromLTRB(isHeading ? 10 : 12, 10, 12, 10),
-                                                    decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8), border: border),
-                                                    child: isHeading
-                                                        ? Row(children: [
-                                                      Container(
-                                                        width: 3, height: fontSize * 1.1,
-                                                        margin: const EdgeInsets.only(right: 8),
-                                                        decoration: BoxDecoration(
-                                                          color: lvl == 1 ? Theme.of(context).colorScheme.primary
-                                                              : lvl == 2 ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.6)
-                                                              : Theme.of(context).colorScheme.primary.withValues(alpha: 0.35),
-                                                          borderRadius: BorderRadius.circular(2),
+                                              return Padding(
+                                                padding: extraPad,
+                                                child: Container(
+                                                  margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+                                                  child: InkWell(
+                                                    onTap: () => setState(() { _selectedChunkIndex = index; }),
+                                                    borderRadius: BorderRadius.circular(8),
+                                                    child: AnimatedContainer(
+                                                      duration: const Duration(milliseconds: 150),
+                                                      padding: EdgeInsets.fromLTRB(isHeading ? 10 : 12, 10, 12, 10),
+                                                      decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8), border: border),
+                                                      child: isHeading
+                                                          ? Row(children: [
+                                                        Container(
+                                                          width: 3, height: fontSize * 1.1,
+                                                          margin: const EdgeInsets.only(right: 8),
+                                                          decoration: BoxDecoration(
+                                                            color: lvl == 1 ? Theme.of(context).colorScheme.primary
+                                                                : lvl == 2 ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.6)
+                                                                : Theme.of(context).colorScheme.primary.withValues(alpha: 0.35),
+                                                            borderRadius: BorderRadius.circular(2),
+                                                          ),
                                                         ),
-                                                      ),
-                                                      Expanded(child: textWidget),
-                                                    ])
-                                                        : textWidget,
+                                                        Expanded(child: textWidget),
+                                                      ])
+                                                          : textWidget,
+                                                    ),
                                                   ),
                                                 ),
-                                              ),
-                                            );
-                                          },
+                                              );
+                                            },
+                                          ),
                                         ),
                                       ),
                                     ),

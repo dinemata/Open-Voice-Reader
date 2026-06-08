@@ -63,13 +63,18 @@ class TextSanitizer {
 
     for (var word in words) {
       // ── Bullet-start heuristic ─────────────────────────────────────────────
-      // If the incoming word is a bullet character (•, ‣, ▸, –, —, *, -)
-      // that appears at the start of a new item, flush the current chunk first
-      // so each bullet point becomes its own chunk. We only split if there is
-      // already some content in the current chunk (wordCount > 0) to avoid
-      // creating empty leading chunks.
-      final isBulletChar = RegExp(r'^[•‣▸▪◦\-\*]$').hasMatch(word.text.trim());
-      if (isBulletChar && wordCount > 0) {
+      // If the incoming word IS a bullet character or STARTS WITH one (PDFs
+      // often attach the bullet to the first word, e.g. "•Rozvíjení"),
+      // flush the current chunk so each bullet item becomes its own chunk.
+      // Only flush if there's already content (wordCount > 0).
+      // Also catches mid-line bullets (some PDFs render "text • next item").
+      final wTrim = word.text.trim();
+      final isBulletWord = wTrim.isNotEmpty && (
+          wTrim == '•' || wTrim == '‣' || wTrim == '▸' || wTrim == '▪' || wTrim == '◦' ||
+              wTrim.startsWith('•') || wTrim.startsWith('‣') || wTrim.startsWith('▸') ||
+              wTrim.startsWith('▪') || wTrim.startsWith('◦')
+      );
+      if (isBulletWord && wordCount > 0) {
         chunks.add(List.from(currentChunk));
         currentChunk.clear();
         buffer.clear();
@@ -299,12 +304,13 @@ class TextSanitizer {
         }
 
         // ── Bullet-start heuristic ─────────────────────────────────────────
-        // Bullet-pointed paragraphs (•, ‣, ▸, -, *) have normal line spacing
+        // Bullet-pointed paragraphs (•, ‣, ▸, ▪, ◦) have normal line spacing
         // but each bullet item should be its own chunk so it reads naturally.
-        // Any positive gap before a bullet character forces a new block.
+        // We use only unambiguous bullet chars (not - or *) to avoid false
+        // splits on hyphenated words or footnote markers.
         if (verticalDistance > 0 &&
             currentLineFirstWord.isNotEmpty &&
-            RegExp(r'^[•‣▸▪◦\-\*]').hasMatch(currentLineFirstWord)) {
+            RegExp(r'^[•‣▸▪◦]').hasMatch(currentLineFirstWord)) {
           return true;
         }
       }

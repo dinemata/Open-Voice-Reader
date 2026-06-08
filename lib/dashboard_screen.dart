@@ -152,10 +152,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
         await _smoothProgress(0.72);
       } else if (ext.endsWith('.doc') || ext.endsWith('.docx')) {
-        // docx: treat as text — SpeechTestView handles actual parsing
         setState(() { _importStatus = 'Čtu Word dokument...'; });
         await _smoothProgress(0.60);
-        wordCount = 100; chunkCount = 10; // placeholder; real count done on open
+        wordCount = 100; chunkCount = 10;
         await _smoothProgress(0.90);
       } else {
         setState(() { _importStatus = 'Čtu PDF...'; });
@@ -210,12 +209,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (context) => SpeechTestView(book: book)),
     ).then((_) async {
-      // Only stop if audio is NOT globally busy (i.e. user stopped in SpeechTestView)
-      // If still busy, let it continue — the dashboard AudioPlayerBar will show controls
       if (!globalIsAudioBusy && !Platform.isAndroid && !Platform.isIOS) {
         try { await windowsPlayer.stop(); } catch (_) {}
       }
-      // Sync speed from whatever SpeechTestView last used
       if (mounted) {
         final prefs = await SharedPreferences.getInstance();
         final activeId = globalActiveBookId;
@@ -356,7 +352,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // Speed overlay — reuse same pattern as SpeechTestView
   void _toggleSpeedOverlay(BuildContext context) {
     if (_speedOpen) { _closeSpeedOverlay(); } else { _openSpeedOverlay(context); }
   }
@@ -472,13 +467,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     ]);
   }
 
-  // ─── File type icon helper ──────────────────────────────────────────────────
   IconData _fileIcon(String path) {
     final ext = path.toLowerCase();
     if (ext.endsWith('.txt')) return Icons.description_rounded;
     if (ext.endsWith('.doc') || ext.endsWith('.docx')) return Icons.article_rounded;
     return Icons.picture_as_pdf_rounded;
   }
+
   Color _fileIconColor(String path, bool exists) {
     if (!exists) return Colors.grey;
     final ext = path.toLowerCase();
@@ -522,13 +517,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         elevation: 0,
         shape: Border(bottom: BorderSide(color: dividerColor, width: 1)),
         title: _buildAppBarTitle(),
-        // MoveWindow is added as a transparent overlay in flexibleSpace
-        // so it doesn't interfere with AppBar's internal layout algorithm.
         flexibleSpace: (!Platform.isAndroid && !Platform.isIOS)
             ? WindowTitleBarBox(child: MoveWindow())
             : null,
         actions: [
-          // Sponsor button
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: SponsorButton(),
@@ -562,7 +554,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
           const SizedBox(width: 8),
-          // Window controls — only shown on desktop where we have a custom title bar
           if (!Platform.isAndroid && !Platform.isIOS) _WindowControls(isDark: _isDark),
         ],
       ),
@@ -575,7 +566,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  // Import button — dark-mode aware
                   Material(
                     color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
                     borderRadius: BorderRadius.circular(16),
@@ -624,7 +614,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           const SizedBox(height: 10),
                           Text('Otevřít PDF, TXT nebo Word dokument',
                               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14,
-                                  color: _isDark ? const Color(0xFF1A73E8) : const Color(0xFF1A73E8))),
+                                  color: const Color(0xFF1A73E8))),
                         ]),
                       ),
                     ),
@@ -695,7 +685,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                               color: _fileIconColor(book.filePath, exists), size: 48),
                                         ),
                                       ),
-                                      // Type badge — dark bg
+                                      // Type badge — uses badgeBg (semi-transparent is fine for icons)
                                       Positioned(top: 8, left: 8,
                                         child: Container(
                                           padding: const EdgeInsets.all(6),
@@ -704,10 +694,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                               color: _fileIconColor(book.filePath, exists), size: 16),
                                         ),
                                       ),
-                                      // Options menu — dark bg
+                                      // Options menu — solid dark circle in dark mode so dots are visible
                                       Positioned(top: 8, right: 8,
                                         child: Container(
-                                          decoration: BoxDecoration(color: badgeBg, shape: BoxShape.circle),
+                                          decoration: BoxDecoration(
+                                            color: _isDark ? const Color(0xFF2C2C2C) : Colors.white.withValues(alpha: 0.92),
+                                            shape: BoxShape.circle,
+                                          ),
                                           child: PopupMenuButton<String>(
                                             padding: EdgeInsets.zero,
                                             constraints: const BoxConstraints(),
@@ -768,7 +761,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ]),
         ),
       ),
-      // Bottom player — uses the same AudioPlayerBar as SpeechTestView
       bottomNavigationBar: activeBook == null ? null : Container(
         decoration: BoxDecoration(
           color: _isDark ? const Color(0xFF1E1E1E) : Colors.white,
@@ -778,17 +770,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         child: SafeArea(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            // Book title
             Padding(
               padding: const EdgeInsets.only(bottom: 2),
               child: Row(children: [
-                Icon(Icons.menu_book_rounded, size: 13, color: const Color(0xFF1A73E8)),
+                const Icon(Icons.menu_book_rounded, size: 13, color: Color(0xFF1A73E8)),
                 const SizedBox(width: 6),
                 Expanded(child: Text(activeBook.title, maxLines: 1, overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: textPrimary))),
               ]),
             ),
-            // Identical AudioPlayerBar
             AudioPlayerBar(
               isReady: true,
               isBusy: globalIsAudioBusy,
@@ -848,7 +838,6 @@ class _WindowControlsState extends State<_WindowControls> {
   @override
   void initState() {
     super.initState();
-    // Sync maximized state on init
     if (!Platform.isAndroid && !Platform.isIOS) {
       try { _isMaximized = appWindow.isMaximized; } catch (_) {}
     }
