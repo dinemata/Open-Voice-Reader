@@ -62,15 +62,29 @@ class TextSanitizer {
     int wordCount = 0;
 
     for (var word in words) {
+      // ── Bullet-start heuristic ─────────────────────────────────────────────
+      // If the incoming word is a bullet character (•, ‣, ▸, –, —, *, -)
+      // that appears at the start of a new item, flush the current chunk first
+      // so each bullet point becomes its own chunk. We only split if there is
+      // already some content in the current chunk (wordCount > 0) to avoid
+      // creating empty leading chunks.
+      final isBulletChar = RegExp(r'^[•‣▸▪◦\-\*]$').hasMatch(word.text.trim());
+      if (isBulletChar && wordCount > 0) {
+        chunks.add(List.from(currentChunk));
+        currentChunk.clear();
+        buffer.clear();
+        wordCount = 0;
+      }
+
       currentChunk.add(word);
       buffer.write(buffer.isEmpty ? word.text : " ${word.text}");
       wordCount++;
 
       bool isEnd = hasSentenceEnd(word.text);
-      // Split at sentence boundary after 20+ words, or hard-split at 35 words.
-      // Keeping chunks short means generate() never blocks for more than ~1s,
-      // which is the maximum acceptable freeze on the main thread.
-      if ((isEnd && wordCount >= 20) || wordCount >= 35) {
+      // Split at sentence boundary after 40+ words, or hard-split at 60 words.
+      // Pre-generation during playback means the freeze happens while audio
+      // plays rather than between chunks, so longer chunks are fine again.
+      if ((isEnd && wordCount >= 40) || wordCount >= 60) {
         chunks.add(List.from(currentChunk));
         currentChunk.clear();
         buffer.clear();
@@ -281,6 +295,16 @@ class TextSanitizer {
         if (verticalDistance > 0 &&
             currentLineFirstWord.isNotEmpty &&
             RegExp(r'^\d').hasMatch(currentLineFirstWord)) {
+          return true;
+        }
+
+        // ── Bullet-start heuristic ─────────────────────────────────────────
+        // Bullet-pointed paragraphs (•, ‣, ▸, -, *) have normal line spacing
+        // but each bullet item should be its own chunk so it reads naturally.
+        // Any positive gap before a bullet character forces a new block.
+        if (verticalDistance > 0 &&
+            currentLineFirstWord.isNotEmpty &&
+            RegExp(r'^[•‣▸▪◦\-\*]').hasMatch(currentLineFirstWord)) {
           return true;
         }
       }
